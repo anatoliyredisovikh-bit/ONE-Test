@@ -1,5 +1,5 @@
 -- ============================================================
--- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (исправленная отрисовка)
+-- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (с библиотекой forms)
 -- ============================================================
 
 local component = require("component")
@@ -11,15 +11,13 @@ local math = require("math")
 local os = require("os")
 local unicode = require("unicode")
 local computer = require("computer")
-local term = require("term")
+local process = require("process")
+local forms = require("forms")  -- подключаем библиотеку
 
--- ===== НАСТРОЙКИ =====
 local TIMEZONE_OFFSET = 3 * 3600
-local ACCESS_PASSWORD = "admin"
-local SERVER_PORT = 0xffef
 
 local modem = component.modem
-modem.open(SERVER_PORT)
+modem.open(0xffef)
 modem.open(0xfffe)
 
 event.ignore("interrupted", function() end)
@@ -156,13 +154,13 @@ local markets = {}
 local SESSION_TIMEOUT = 31536000
 local marketConnected = false
 local shopPaused = false
+local ADMIN_NAME = "Kalleront"  -- для совместимости, но мы используем admins
 
 -- ===== ФУНКЦИИ СЕРВЕРА =====
 local function getOrCreatePlayer(name)
     if not players[name] then
         players[name] = {
             balance = 0.0,
-            emaBalance = 0.0,
             transactions = 0,
             regDate = getRealDateTimeString(),
             agreed = false,
@@ -180,120 +178,429 @@ local function validateSession(name, token)
     return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
 end
 
--- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ =====
-local WIDTH, HEIGHT = 80, 25
-gpu.setResolution(WIDTH, HEIGHT)
+-- ============================================================
+-- АДМИН-ПАНЕЛЬ (на основе библиотеки forms)
+-- ============================================================
 
-local function clear()
-    gpu.setBackground(0x000000)
-    gpu.fill(1, 1, WIDTH, HEIGHT, " ")
-end
+local function showPlayersList()
+    local playersForm = forms.newForm("ИГРОКИ", 1, 1, 80, 25)
+    playersForm:addLabel(2, 1, "# ИГРОКИ", 0xFFFFFF)
 
-local function write(x, y, text, fg)
-    if y < 1 or y > HEIGHT or x > WIDTH then return end
-    text = tostring(text or "")
-    if x < 1 then
-        text = unicode.sub(text, 2 - x)
-        x = 1
+    -- Список игроков
+    local list = playersForm:addListBox(2, 3, 60, 15)
+    for name, data in pairs(players) do
+        local status = data.banned and "❌" or "✅"
+        local text = string.format("%-15s | Coin: %8.2f | Транз: %4d %s", name, data.balance, data.transactions, status)
+        list:addItem(text)
     end
-    if text == "" then return end
-    gpu.setForeground(fg or 0xFFFFFF)
-    gpu.setBackground(0x000000)
-    gpu.set(x, y, unicode.sub(text, 1, WIDTH - x + 1))
+
+    -- Кнопка "Назад"
+    local backBtn = playersForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        playersForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(playersForm)
+    forms.run()
 end
 
--- ===== МЕНЮ =====
-local menuItems = {
-    { id = "players",   label = "ИГРОКИ",          desc = "Балансы, блокировки, транзакции" },
-    { id = "feedbacks", label = "ОТЗЫВЫ",          desc = "Чтение и удаление отзывов" },
-    { id = "journal",   label = "ЖУРНАЛ",          desc = "Только важные события" },
-    { id = "stats",     label = "СТАТИСТИКА",      desc = "Покупки, продажи, оборот" },
-    { id = "admins",    label = "АДМИНИСТРАТОРЫ",  desc = "Добавить или удалить админа" },
-    { id = "pause",     label = "ПРИОСТАНОВИТЬ МАГАЗИН", desc = "Управление доступностью терминалов" },
-    { id = "reports",   label = "РЕПОРТЫ",        desc = "Чтение и удаление жалоб" },
-    { id = "additem",   label = "ДОБАВИТЬ ПРЕДМЕТ", desc = "Отправить предмет в каталог" },
-    { id = "back",      label = "< НАЗАД >",       desc = "" },
-}
+local function showFeedbacks()
+    local fbForm = forms.newForm("ОТЗЫВЫ", 1, 1, 80, 25)
+    fbForm:addLabel(2, 1, "# ОТЗЫВЫ", 0xFFFFFF)
 
-local selected = 1
-local currentScreen = "menu"
-local listScroll = 1
-local listSelected = 1
-local editMode = false
-local editInput = ""
-local editField = ""
+    local feedbacks = {}
+    if filesystem.exists("/home/feedbacks.db") then
+        local file = io.open("/home/feedbacks.db", "r")
+        if file then
+            local data = file:read("*a")
+            file:close()
+            if data and #data > 0 then
+                local ok, result = pcall(serialization.unserialize, data)
+                if ok and type(result) == "table" then
+                    feedbacks = result
+                end
+            end
+        end
+    end
 
--- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ =====
-local function drawHeader(title)
-    write(1, 1, "# " .. (title or "PTM MARKET SERVER"), 0xFFFFFF)
-    write(1, 2, "Администрирование", 0x888888)
+    local list = fbForm:addListBox(2, 3, 60, 15)
+    for i, fb in ipairs(feedbacks) do
+        local text = string.format("%-15s | %s | %s", fb.name or "?", fb.time or "", fb.text or "")
+        list:addItem(text)
+    end
+
+    local backBtn = fbForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        fbForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(fbForm)
+    forms.run()
 end
 
-local function drawMenu()
-    clear()
-    drawHeader()
-    for i, item in ipairs(menuItems) do
-        local y = 4 + i - 1
-        local isSelected = (i == selected)
-        local fg = isSelected and 0xFFFFFF or 0x888888
-        local descFg = isSelected and 0xAAAAAA or 0x555555
+local function showJournal()
+    local journalForm = forms.newForm("ЖУРНАЛ СОБЫТИЙ", 1, 1, 80, 25)
+    journalForm:addLabel(2, 1, "# ЖУРНАЛ", 0xFFFFFF)
 
-        local label
-        if i < #menuItems then
-            label = "## " .. item.label
+    local lines = {}
+    if filesystem.exists("/home/server_events.log") then
+        local file = io.open("/home/server_events.log", "r")
+        if file then
+            for line in file:lines() do
+                table.insert(lines, line)
+            end
+            file:close()
+        end
+    end
+
+    local list = journalForm:addListBox(2, 3, 76, 15)
+    for _, line in ipairs(lines) do
+        list:addItem(line)
+    end
+
+    local backBtn = journalForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        journalForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(journalForm)
+    forms.run()
+end
+
+local function showStats()
+    local statsForm = forms.newForm("СТАТИСТИКА", 1, 1, 80, 25)
+    statsForm:addLabel(2, 1, "# СТАТИСТИКА", 0xFFFFFF)
+
+    local totalPlayers = 0
+    for _ in pairs(players) do totalPlayers = totalPlayers + 1 end
+
+    local y = 4
+    statsForm:addLabel(4, y, "Всего репортов:", 0x888888)
+    statsForm:addLabel(25, y, tostring(globalStats.totalReports or 0), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Всего покупок:", 0x888888)
+    statsForm:addLabel(25, y, tostring(globalStats.totalBuys or 0), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Всего продаж:", 0x888888)
+    statsForm:addLabel(25, y, tostring(globalStats.totalSells or 0), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Всего игроков:", 0x888888)
+    statsForm:addLabel(25, y, tostring(totalPlayers), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Активных сессий:", 0x888888)
+    local activeSessions = 0
+    for _, s in pairs(sessions) do
+        if s.token then activeSessions = activeSessions + 1 end
+    end
+    statsForm:addLabel(25, y, tostring(activeSessions), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Подключённых терминалов:", 0x888888)
+    statsForm:addLabel(25, y, tostring(#markets), 0xFFFFFF)
+    y = y + 1
+    statsForm:addLabel(4, y, "Администраторов:", 0x888888)
+    statsForm:addLabel(25, y, tostring(#admins), 0xFFFFFF)
+
+    local backBtn = statsForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        statsForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(statsForm)
+    forms.run()
+end
+
+local function showAdminsList()
+    local admForm = forms.newForm("АДМИНИСТРАТОРЫ", 1, 1, 80, 25)
+    admForm:addLabel(2, 1, "# АДМИНИСТРАТОРЫ", 0xFFFFFF)
+
+    local list = admForm:addListBox(2, 3, 30, 10)
+    for i, name in ipairs(admins) do
+        list:addItem(string.format("%d. %s", i, name))
+    end
+
+    -- Поле для добавления админа
+    admForm:addLabel(2, 15, "Добавить администратора:", 0x888888)
+    local edit = admForm:addEdit(2, 16, 20, 1)
+    local addBtn = admForm:addButton(24, 16, 8, 1, "ДОБАВИТЬ", 0xFFFFFF, 0x00AA00)
+    addBtn.onClick = function()
+        local name = edit:getText()
+        if name ~= "" then
+            if addAdmin(name) then
+                printLog("Администратор добавлен: " .. name)
+                admForm:close()
+                showAdminsList()
+            else
+                printLog("Ошибка добавления админа")
+            end
+        end
+    end
+
+    local backBtn = admForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        admForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(admForm)
+    forms.run()
+end
+
+local function showReports()
+    local repForm = forms.newForm("РЕПОРТЫ", 1, 1, 80, 25)
+    repForm:addLabel(2, 1, "# РЕПОРТЫ", 0xFFFFFF)
+
+    local reports = {}
+    if filesystem.exists("/home/reports.log") then
+        local file = io.open("/home/reports.log", "r")
+        if file then
+            for line in file:lines() do
+                table.insert(reports, line)
+            end
+            file:close()
+        end
+    end
+
+    local list = repForm:addListBox(2, 3, 76, 15)
+    for _, line in ipairs(reports) do
+        list:addItem(line)
+    end
+
+    local backBtn = repForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        repForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(repForm)
+    forms.run()
+end
+
+local function showAddItem()
+    local addForm = forms.newForm("ДОБАВИТЬ ПРЕДМЕТ", 1, 1, 80, 25)
+    addForm:addLabel(2, 1, "# ДОБАВИТЬ ПРЕДМЕТ", 0xFFFFFF)
+
+    addForm:addLabel(4, 4, "Internal Name:", 0x888888)
+    local internalEdit = addForm:addEdit(20, 4, 30, 1)
+
+    addForm:addLabel(4, 6, "Display Name:", 0x888888)
+    local displayEdit = addForm:addEdit(20, 6, 30, 1)
+
+    addForm:addLabel(4, 8, "Price:", 0x888888)
+    local priceEdit = addForm:addEdit(20, 8, 10, 1)
+
+    addForm:addLabel(4, 10, "Damage:", 0x888888)
+    local damageEdit = addForm:addEdit(20, 10, 10, 1)
+
+    local sendBtn = addForm:addButton(20, 14, 12, 1, "ОТПРАВИТЬ", 0xFFFFFF, 0x00AA00)
+    sendBtn.onClick = function()
+        local internal = internalEdit:getText()
+        local display = displayEdit:getText()
+        local price = tonumber(priceEdit:getText()) or 0
+        local damage = tonumber(damageEdit:getText()) or 0
+        if internal == "" or display == "" then
+            printLog("Ошибка: Internal Name и Display Name обязательны")
+            return
+        end
+        if price <= 0 then
+            printLog("Ошибка: цена должна быть >0")
+            return
+        end
+
+        local data = {
+            op = "add_buy_item",
+            internalName = internal,
+            displayName = display,
+            price = price,
+            damage = damage
+        }
+
+        if next(markets) == nil then
+            printLog("Нет подключённых терминалов!")
         else
-            label = "< НАЗАД >"
+            local sent = 0
+            for addr, _ in pairs(markets) do
+                modem.send(addr, 0xffef, serialization.serialize(data))
+                sent = sent + 1
+            end
+            printLog("Предмет отправлен на " .. sent .. " терминалов: " .. display)
+            -- также отправляем команду перезагрузки
+            for addr, _ in pairs(markets) do
+                modem.send(addr, 0xffef, serialization.serialize({op = "reload_buy_items"}))
+            end
         end
-
-        write(2, y, label, fg)
-        if item.desc and item.desc ~= "" then
-            write(32, y, item.desc, descFg)
-        end
+        addForm:close()
+        showMainMenu()
     end
-    write(2, HEIGHT - 1, "Esc – назад | выберите раздел мыльной", 0x666666)
+
+    local backBtn = addForm:addButton(2, 20, 12, 1, "НАЗАД", 0xFFFFFF, 0x4A90E2)
+    backBtn.onClick = function()
+        addForm:close()
+        showMainMenu()
+    end
+
+    forms.setActiveForm(addForm)
+    forms.run()
 end
 
--- ===== РАЗДЕЛ "ИГРОКИ" =====
--- (код остаётся без изменений, я не буду его повторять для краткости,
--- но в финальном файле он должен быть. Полный код вы получите в следующем сообщении,
--- если скажете, что этот подход работает.)
+local function togglePause()
+    shopPaused = not shopPaused
+    printLog("Магазин " .. (shopPaused and "приостановлен" or "возобновлён"))
+    for addr, _ in pairs(markets) do
+        modem.send(addr, 0xffef, serialization.serialize({op = "pause_status", paused = shopPaused}))
+    end
+    showMainMenu()
+end
 
--- ===== ОСТАЛЬНЫЕ РАЗДЕЛЫ (идентичны предыдущей версии) =====
--- ...
+-- ===== ГЛАВНОЕ МЕНЮ =====
+local function showMainMenu()
+    local mainForm = forms.newForm("PTM MARKET SERVER", 1, 1, 80, 25)
 
--- ===== ОСНОВНОЙ ЦИКЛ =====
+    -- Заголовок
+    mainForm:addLabel(2, 1, "# PTM MARKET SERVER", 0xFFFFFF)
+    mainForm:addLabel(2, 2, "Администрирование", 0x888888)
+
+    -- Кнопки с именами разделов
+    local y = 4
+    local btnWidth = 28
+    local descX = 32
+
+    local playersBtn = mainForm:addButton(2, y, btnWidth, 1, "## ИГРОВИ", 0xFFFFFF, 0x1A2A4A)
+    mainForm:addLabel(descX, y, "Балансы, блокировки, транзакции", 0xAAAAAA)
+
+    local feedbacksBtn = mainForm:addButton(2, y+1, btnWidth, 1, "## ОТЗЫВЫ", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+1, "Чтение и удаление отзывов", 0x555555)
+
+    local journalBtn = mainForm:addButton(2, y+2, btnWidth, 1, "## ЖУРНАЛ", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+2, "Только важные события", 0x555555)
+
+    local statsBtn = mainForm:addButton(2, y+3, btnWidth, 1, "## СТАТИСТИКА", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+3, "Покупки, продажи, оборот", 0x555555)
+
+    local adminsBtn = mainForm:addButton(2, y+4, btnWidth, 1, "## АДМИНИСТРАТОРЫ", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+4, "Добавить или удалить админа", 0x555555)
+
+    local pauseBtn = mainForm:addButton(2, y+5, btnWidth, 1, "## ПРИОСТАНОВИТЬ МАГАЗИН", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+5, "Управление доступностью терминалов", 0x555555)
+
+    local reportsBtn = mainForm:addButton(2, y+6, btnWidth, 1, "## РЕПОРТЫ", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+6, "Чтение и удаление жалоб", 0x555555)
+
+    local addItemBtn = mainForm:addButton(2, y+7, btnWidth, 1, "## ДОБАВИТЬ ПРЕДМЕТ", 0x888888, 0x0A0A0A)
+    mainForm:addLabel(descX, y+7, "Отправить предмет в каталог", 0x555555)
+
+    local backBtn = mainForm:addButton(2, y+8, btnWidth, 1, "< НАЗАД >", 0x888888, 0x0A0A0A)
+    -- для < НАЗАД > описания нет
+
+    -- Нижняя строка
+    mainForm:addLabel(2, 24, "Esc – назад | выберите раздел мышью или стрелками", 0x666666)
+
+    -- Обработчики кликов
+    playersBtn.onClick = function()
+        mainForm:close()
+        showPlayersList()
+    end
+
+    feedbacksBtn.onClick = function()
+        mainForm:close()
+        showFeedbacks()
+    end
+
+    journalBtn.onClick = function()
+        mainForm:close()
+        showJournal()
+    end
+
+    statsBtn.onClick = function()
+        mainForm:close()
+        showStats()
+    end
+
+    adminsBtn.onClick = function()
+        mainForm:close()
+        showAdminsList()
+    end
+
+    pauseBtn.onClick = function()
+        mainForm:close()
+        togglePause()
+    end
+
+    reportsBtn.onClick = function()
+        mainForm:close()
+        showReports()
+    end
+
+    addItemBtn.onClick = function()
+        mainForm:close()
+        showAddItem()
+    end
+
+    backBtn.onClick = function()
+        mainForm:close()
+        -- Выход из админ-панели (просто завершаем поток)
+        os.exit()
+    end
+
+    forms.setActiveForm(mainForm)
+    forms.run()
+end
+
+-- ============================================================
+-- ЗАПУСК АДМИН-ПАНЕЛИ В ОТДЕЛЬНОМ ПОТОКЕ
+-- ============================================================
+
+local function adminThread()
+    -- Небольшая задержка, чтобы сервер успел запуститься
+    os.sleep(1)
+    showMainMenu()
+end
+
+-- Запускаем админ-панель в отдельном потоке
+process.load(adminThread)
+
+-- ============================================================
+-- ОСНОВНОЙ ЦИКЛ СЕРВЕРА
+-- ============================================================
+
 printLog("Сервер запущен. Администраторы: " .. table.concat(admins, ", "))
-drawMenu()
+printLog("Админ-панель запущена в фоновом потоке.")
 
 while true do
     local ev = {event.pull(0.5)}
     local etype = ev[1]
 
-    -- ===== ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ =====
     if etype == "modem_message" then
         local from = ev[3]
         local raw = ev[6]
         local success, msg = pcall(serialization.unserialize, raw)
-        if not success or not msg or type(msg) ~= "table" then goto continue end
+        if not success or not msg or type(msg) ~= "table" then
+            goto continue
+        end
 
         if msg.op == "register" then
             if msg.password ~= ACCESS_PASSWORD then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Неверный пароль"}))
+                modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный пароль"}))
                 printLog("Попытка подключения с неверным паролем от " .. from)
                 goto continue
             end
             marketConnected = true
-            if not owner then owner = from end
+            if not owner then
+                owner = from
+                printLog("АДМИН ЗАРЕГИСТРИРОВАН: " .. from)
+            end
             if not markets[from] then
                 markets[from] = true
                 printLog("Терминал добавлен: " .. from)
             end
-            modem.send(from, SERVER_PORT, serialization.serialize({op="welcome", owner=(from==owner), shopPaused=shopPaused}))
-            if currentScreen == "menu" then drawMenu() end
+            modem.send(from, 0xffef, serialization.serialize({op="welcome", owner=(from==owner), shopPaused=shopPaused}))
             goto continue
         elseif msg.op == "enter" then
             if shopPaused then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Магазин на паузе"}))
+                modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
                 goto continue
             end
             local playerName = msg.name
@@ -303,21 +610,23 @@ while true do
             end
             local player = getOrCreatePlayer(playerName)
             if player.banned then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Вы забанены"}))
+                modem.send(from, 0xffef, serialization.serialize({op="error", message="Вы забанены"}))
                 goto continue
             end
+
             local existingSession = sessions[playerName]
             local token
             if existingSession and os.time() - (existingSession.lastAction or 0) < SESSION_TIMEOUT then
                 token = existingSession.token
                 existingSession.lastAction = os.time()
-                printLog(playerName .. " продлил сессию")
+                printLog(playerName .. " продлил сессию. Токен: " .. token)
             else
                 token = tostring(math.floor(math.random() * 900000000 + 100000000))
                 sessions[playerName] = {token = token, lastAction = os.time()}
-                printLog(playerName .. " вошёл")
+                printLog(playerName .. " вошёл. Токен: " .. token)
             end
-            modem.send(from, SERVER_PORT, serialization.serialize({
+
+            modem.send(from, 0xffef, serialization.serialize({
                 op="welcome", status="ok", token=token,
                 balance=player.balance or 0.0,
                 transactions=player.transactions,
@@ -325,17 +634,16 @@ while true do
                 agreed = player.agreed or false,
                 shopPaused = shopPaused
             }))
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "getAccount" then
             if not validateSession(msg.name, msg.token) then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="accountData", error=true, message="Токен устарел"}))
+                modem.send(from, 0xffef, serialization.serialize({op="accountData", error = true, message = "Токен устарел"}))
                 goto continue
             end
             local player = players[msg.name]
             if not player then goto continue end
             sessions[msg.name].lastAction = os.time()
-            modem.send(from, SERVER_PORT, serialization.serialize({
+            modem.send(from, 0xffef, serialization.serialize({
                 op="accountData",
                 data = {
                     balance = player.balance,
@@ -346,11 +654,10 @@ while true do
                 }
             }))
             printLog("Аккаунт отправлен для " .. msg.name)
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "sell" then
             if shopPaused then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Магазин на паузе"}))
+                modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
                 goto continue
             end
             if not validateSession(msg.name, msg.token) then
@@ -361,17 +668,19 @@ while true do
             if not player or player.banned then goto continue end
             local qty = tonumber(msg.qty) or 0
             local value = tonumber(msg.value) or 0
+
             player.balance = (player.balance or 0) + value
             player.transactions = (player.transactions or 0) + 1
             sessions[msg.name].lastAction = os.time()
+
             globalStats.totalSells = (globalStats.totalSells or 0) + 1
-            saveGlobalStats(); saveDB()
-            printLog(string.format("💰 %s пополнил баланс: %s x%d на %.2f", msg.name, msg.item, qty, value))
-            if currentScreen == "menu" then drawMenu() end
+            saveGlobalStats()
+            saveDB()
+            printLog(string.format("💰 %s пополнил баланс: предмет '%s' x%d на сумму %.2f", msg.name, msg.item, qty, value))
             goto continue
         elseif msg.op == "buy" then
             if shopPaused then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Магазин на паузе"}))
+                modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
                 goto continue
             end
             if not validateSession(msg.name, msg.token) then
@@ -381,17 +690,15 @@ while true do
             local player = players[msg.name]
             if not player or player.banned then goto continue end
             local value = tonumber(msg.value) or 0
-            if player.balance < value then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="error", message="Недостаточно средств"}))
-                goto continue
-            end
-            player.balance = player.balance - value
+
+            player.balance = (player.balance or 0) - value
             player.transactions = (player.transactions or 0) + 1
             sessions[msg.name].lastAction = os.time()
+
             globalStats.totalBuys = (globalStats.totalBuys or 0) + 1
-            saveGlobalStats(); saveDB()
+            saveGlobalStats()
+            saveDB()
             printLog(string.format("🛒 %s купил %s x%d за %.2f", msg.name, msg.item, msg.qty, value))
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "report" then
             if not validateSession(msg.name, msg.token) then
@@ -406,14 +713,14 @@ while true do
             if file then
                 file:write("[" .. msg.time .. "] " .. msg.name .. ": " .. msg.text .. "\n")
                 file:close()
+                printLog("Сохранено в reports.log")
             else
                 printLog("Не удалось открыть reports.log")
             end
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "agree" then
             if not validateSession(msg.name, msg.token) then
-                modem.send(from, SERVER_PORT, serialization.serialize({ op="agree", error=true, message="Токен устарел" }))
+                modem.send(from, 0xffef, serialization.serialize({ op="agree", error = true, message = "Токен устарел" }))
                 goto continue
             end
             local player = players[msg.name]
@@ -421,16 +728,15 @@ while true do
                 player.agreed = true
                 saveDB()
                 sessions[msg.name].lastAction = os.time()
-                printLog("📝 " .. msg.name .. " принял соглашение")
-                modem.send(from, SERVER_PORT, serialization.serialize({ op="agree", success=true, agreed=true }))
+                printLog("📝 " .. msg.name .. " принял пользовательское соглашение")
+                modem.send(from, 0xffef, serialization.serialize({ op = "agree", success = true, agreed = true }))
             else
-                modem.send(from, SERVER_PORT, serialization.serialize({ op="agree", error=true, message="Игрок не найден" }))
+                modem.send(from, 0xffef, serialization.serialize({ op = "agree", error = true, message = "Игрок не найден" }))
             end
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "get_feedbacks" then
             if not validateSession(msg.name, msg.token) then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
+                modem.send(from, 0xffef, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
                 goto continue
             end
             local player = players[msg.name]
@@ -441,28 +747,29 @@ while true do
                 file:close()
                 if data and #data > 0 then
                     local ok, result = pcall(serialization.unserialize, data)
-                    if ok and type(result) == "table" then feedbacks = result end
+                    if ok and type(result) == "table" then
+                        feedbacks = result
+                    end
                 end
             end
-            modem.send(from, SERVER_PORT, serialization.serialize({
-                op="feedbacks_list",
+            modem.send(from, 0xffef, serialization.serialize({
+                op = "feedbacks_list",
                 feedbacks = feedbacks,
                 hasFeedback = player and player.hasFeedback or false
             }))
-            if currentScreen == "menu" then drawMenu() end
             goto continue
         elseif msg.op == "add_feedback" then
             if not validateSession(msg.name, msg.token) then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
+                modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
                 goto continue
             end
             local player = players[msg.name]
             if not player then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="add_feedback_response", success=false, error="Игрок не найден"}))
+                modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Игрок не найден"}))
                 goto continue
             end
             if player.hasFeedback then
-                modem.send(from, SERVER_PORT, serialization.serialize({op="add_feedback_response", success=false, error="Вы уже оставляли отзыв"}))
+                modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Вы уже оставляли отзыв"}))
                 goto continue
             end
             local feedbacks = {}
@@ -472,7 +779,9 @@ while true do
                 file:close()
                 if data and #data > 0 then
                     local ok, result = pcall(serialization.unserialize, data)
-                    if ok and type(result) == "table" then feedbacks = result end
+                    if ok and type(result) == "table" then
+                        feedbacks = result
+                    end
                 end
             end
             table.insert(feedbacks, 1, {name = msg.name, text = msg.text, time = msg.time})
@@ -481,106 +790,10 @@ while true do
             file:close()
             player.hasFeedback = true
             saveDB()
-            modem.send(from, SERVER_PORT, serialization.serialize({op="add_feedback_response", success=true}))
-            printLog("📝 Новый отзыв от " .. msg.name)
-            if currentScreen == "menu" then drawMenu() end
+            modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=true}))
+            printLog("📝 Новый отзыв от " .. msg.name .. ": " .. msg.text)
             goto continue
         end
-        ::continue::
     end
-
-    -- ===== ОБРАБОТКА КЛАВИАТУРЫ =====
-    if etype == "key_down" then
-        local key = ev[4]
-        local char = ev[3]
-
-        if currentScreen == "menu" then
-            if key == 1 then
-                break
-            elseif key == 200 then
-                selected = math.max(1, selected - 1)
-                drawMenu()
-            elseif key == 208 then
-                selected = math.min(#menuItems, selected + 1)
-                drawMenu()
-            elseif key == 28 then
-                local id = menuItems[selected].id
-                if id == "pause" then
-                    handlePause()
-                elseif id == "back" then
-                    break
-                else
-                    currentScreen = id
-                    listScroll = 1; listSelected = 1
-                    if id == "players" then drawPlayers()
-                    elseif id == "feedbacks" then drawFeedbacks()
-                    elseif id == "journal" then drawJournal()
-                    elseif id == "stats" then drawStats()
-                    elseif id == "admins" then drawAdmins()
-                    elseif id == "reports" then drawReports()
-                    elseif id == "additem" then drawAddItem()
-                    end
-                end
-            end
-        elseif currentScreen == "players" then
-            handlePlayers(key, char)
-        elseif currentScreen == "feedbacks" then
-            handleFeedbacks(key, char)
-        elseif currentScreen == "journal" then
-            handleJournal(key, char)
-        elseif currentScreen == "stats" then
-            handleStats(key, char)
-        elseif currentScreen == "admins" then
-            handleAdmins(key, char)
-        elseif currentScreen == "reports" then
-            handleReports(key, char)
-        elseif currentScreen == "additem" then
-            handleAddItem(key, char)
-        end
-    end
-
-    -- ===== ОБРАБОТКА КЛИКОВ МЫШИ =====
-    if etype == "touch" then
-        local x, y = ev[3], ev[4]
-        if currentScreen == "menu" then
-            if y >= 4 and y <= 4 + #menuItems - 1 then
-                local idx = y - 4 + 1
-                if idx >= 1 and idx <= #menuItems then
-                    selected = idx
-                    drawMenu()
-                    local id = menuItems[selected].id
-                    if id == "pause" then
-                        handlePause()
-                    elseif id == "back" then
-                        break
-                    else
-                        currentScreen = id
-                        listScroll = 1; listSelected = 1
-                        if id == "players" then drawPlayers()
-                        elseif id == "feedbacks" then drawFeedbacks()
-                        elseif id == "journal" then drawJournal()
-                        elseif id == "stats" then drawStats()
-                        elseif id == "admins" then drawAdmins()
-                        elseif id == "reports" then drawReports()
-                        elseif id == "additem" then drawAddItem()
-                        end
-                    end
-                end
-            end
-        elseif currentScreen == "players" then
-            if y >= 5 and y <= 19 then
-                local idx = listScroll + (y - 5)
-                local list = {}
-                for name, data in pairs(players) do table.insert(list, {name=name, data=data}) end
-                table.sort(list, function(a,b) return a.name < b.name end)
-                if idx >= 1 and idx <= #list then
-                    listSelected = idx
-                    drawPlayers()
-                end
-            end
-        end
-    end
+    ::continue::
 end
-
-printLog("Сервер остановлен")
-term.clear()
