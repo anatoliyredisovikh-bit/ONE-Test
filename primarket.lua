@@ -27,7 +27,6 @@ local function getRealTimeHM()
     return os.date("%H:%M:%S", getRealTimestamp())
 end
 
--- Лог ошибок и попыток прерывания скрипта.
 local DEBUG_LOG_PATH = "/home/primarket_debug.log"
 
 local function writeDebugLog(message)
@@ -39,7 +38,6 @@ local function writeDebugLog(message)
     end)
 end
 
--- Ctrl+Alt+C/interrupted и другие ошибки event.pull не завершают магазин.
 local function safeEventPull(timeout)
     local result = {pcall(event.pull, timeout)}
     if not result[1] then
@@ -50,6 +48,7 @@ local function safeEventPull(timeout)
     return result
 end
 
+-- ВАЖНО: укажите адрес модема СЕРВЕРА (не этого компьютера)
 local serverAddress = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
 local ACCESS_PASSWORD = "admin"
 
@@ -163,7 +162,7 @@ local function drawScreenBorder()
 end
 
 local shopData = safeDoFile("/home/shop_items.lua")
-local sellItems = shopData.sellItems
+local sellItems = shopData.sellItems or {}
 local vanillaItems = shopData.vanillaItems or {}
 
 local buyItemsData = safeDoFile("/home/buy_items.lua")
@@ -214,19 +213,14 @@ if not selector then
     end
 end
 
--- Безопасный вызов Selector. Индексация selector.setSlot выполняется внутри pcall,
--- поэтому отсутствие Selector больше не вызывает attempt to index a nil value.
 local function safeSelectorSetSlot(slot, stack)
     if not selector then return false end
-
     local ok, result = pcall(function()
         return selector.setSlot(slot, stack)
     end)
-
     if not ok then
         writeDebugLog("⚠️ Ошибка Selector setSlot: " .. tostring(result))
     end
-
     return ok, result
 end
 
@@ -314,7 +308,6 @@ gpu.setBackground(colors.bg_main)
 
 local function drawBigTitle()
     gpu.setForeground(colors.accent_secondary)
-
     local titleLines = {
         "██████╗ ██╗    ███████╗██╗  ██╗ ██████╗ ██████╗ ",
         "██╔══██╗██║    ██╔════╝██║  ██║██╔═══██╗██╔══██╗",
@@ -323,13 +316,10 @@ local function drawBigTitle()
         "██║     ██║    ███████║██║  ██║╚██████╔╝██║     ",
         "╚═╝     ╚═╝    ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝     "
     }
-
     local startY = 8
-
     for i, line in ipairs(titleLines) do
         local lineWidth = unicode.len(line)
         local x = math.floor((80 - lineWidth) / 2) + 1
-
         gpu.set(x, startY + i - 1, line)
     end
 end
@@ -386,7 +376,6 @@ end
 local function drawFeedbacksList()
     clear()
     drawScreenBorder()
-
     local line = string.rep("═", 15)
     local title = " ОТЗЫВЫ "
     local line2 = string.rep("═", 15)
@@ -409,7 +398,6 @@ local function drawFeedbacksList()
         local startIdx = (feedbacksPage - 1) * 3 + 1
         local endIdx = math.min(startIdx + 2, #feedbacks)
         local y = 5
-
         for i = startIdx, endIdx do
             local fb = feedbacks[i]
             if fb then
@@ -417,21 +405,17 @@ local function drawFeedbacksList()
                 gpu.fill(5, y, 70, 3, " ")
                 gpu.setBackground(colors.bg_secondary)
                 gpu.fill(6, y+1, 68, 1, " ")
-
                 gpu.setForeground(colors.accent_main)
                 gpu.set(7, y+1, fb.name)
                 gpu.setForeground(colors.inactive)
                 local timeStr = fb.time or ""
                 gpu.set(7 + unicode.len(fb.name) + 2, y+1, timeStr)
-
                 gpu.setForeground(colors.text_bright)
                 local shortText = unicode.sub(fb.text, 1, 62)
                 gpu.set(7, y+2, shortText)
-
                 y = y + 4
             end
         end
-
         feedbacksTotalPages = math.max(1, math.ceil(#feedbacks / 3))
         local pageInfo = "Страница " .. feedbacksPage .. " из " .. feedbacksTotalPages
         local x = math.floor((80 - unicode.len(pageInfo)) / 2) + 1 + 1
@@ -453,7 +437,6 @@ local function drawFeedbacksList()
         drawFlexButton(prevBtn)
         drawFlexButton(nextBtn)
     end
-
     drawTempMessage()
 end
 
@@ -467,12 +450,10 @@ local function drawFeedbackInputScreen()
     clear()
     drawScreenBorder()
     drawCenteredText(4, "ОСТАВИТЬ ОТЗЫВ", colors.accent_secondary)
-
     gpu.setForeground(colors.text_main)
     drawCenteredText(7, "Ваше имя: " .. currentPlayer, colors.accent_main)
     drawCenteredText(9, "Оставьте свой отзыв о магазине:", colors.text_main)
     drawCenteredText(10, "Ваше мнение поможет нам стать лучше!", colors.inactive)
-
     gpu.setBackground(colors.black_fon)
     gpu.fill(10, 12, 60, 3, " ")
     gpu.setForeground(colors.text_bright)
@@ -491,10 +472,8 @@ local function drawFeedbackInputScreen()
             gpu.set(11, 13, "Введите ваш отзыв...")
         end
     end
-
     local cancelBtn = {x = 20, y = 24, xs = 12, ys = 1, text = "[ ОТМЕНА ]", bg = colors.bg_button, fg = colors.error}
     local sendBtn = {x = 46, y = 24, xs = 15, ys = 1, text = "[ ОТПРАВИТЬ ]", bg = colors.bg_button, fg = colors.success}
-
     drawFlexButton(cancelBtn)
     drawFlexButton(sendBtn)
     drawTempMessage()
@@ -1016,7 +995,6 @@ local function drawPurchaseScreen()
     local totalCoin = (purchaseItem.priceCoin or 0) * purchaseQuantity
     local totalEma = (purchaseItem.priceEma or 0) * purchaseQuantity
 
-    -- На сумму (Coina и ЭМЫ на отдельных строках)
     gpu.setForeground(colors.success)
     gpu.set(3, 5, "На сумму: ")
     local sumY = 5
@@ -1030,7 +1008,6 @@ local function drawPurchaseScreen()
         gpu.set(14, sumY, string.format("%.2f", totalEma) .. " ۞")
     end
 
-    -- Цена за штуку (Coina и ЭМЫ на отдельных строках)
     gpu.setForeground(colors.success)
     gpu.set(55, 5, "Цена: ")
     local priceY = 5
@@ -2671,9 +2648,6 @@ while true do
     if not ok then
         local errText = tostring(err)
         local lowerErr = string.lower(errText)
-
-        -- Если interrupted прилетел не из event.pull, а, например, во время os.sleep,
-        -- не показываем окно ошибки и сразу продолжаем работу магазина.
         if string.find(lowerErr, "interrupted", 1, true)
             or string.find(lowerErr, "terminate", 1, true) then
             writeDebugLog("⚠️ Заблокирована попытка завершить скрипт: " .. errText)
