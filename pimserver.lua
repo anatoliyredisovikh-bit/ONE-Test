@@ -218,18 +218,13 @@ local function write(x, y, text, fg)
     gpu.set(x, y, unicode.sub(text, 1, WIDTH - x + 1))
 end
 
--- Рисуем кнопку с рамкой
 local function drawButton(x, y, w, text, isSelected, borderColor, bgColor, fgColor)
-    -- Левая рамка
     gpu.setForeground(borderColor or COLORS.normalBorder)
     gpu.setBackground(bgColor or COLORS.bg)
     gpu.set(x, y, "│")
-    -- Правая рамка
     gpu.set(x + w - 1, y, "│")
-    -- Заливка фона
     gpu.setBackground(bgColor or COLORS.bg)
     gpu.fill(x + 1, y, w - 2, 1, " ")
-    -- Текст
     gpu.setForeground(fgColor or COLORS.normalText)
     gpu.set(x + 2, y, text)
 end
