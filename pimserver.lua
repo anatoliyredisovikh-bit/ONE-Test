@@ -223,7 +223,7 @@ local editMode = false
 local editInput = ""
 local editField = ""
 
--- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ (ГЛАВНОЕ ИСПРАВЛЕНИЕ) =====
+-- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ =====
 local function drawHeader(title)
     write(1, 1, "# " .. (title or "PTM MARKET SERVER"), 0xFFFFFF)
     write(1, 2, "Администрирование", 0x888888)
