@@ -1,5 +1,5 @@
 -- ============================================================
--- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (точное соответствие эталону)
+-- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (эталонная отрисовка)
 -- ============================================================
 
 local component = require("component")
@@ -180,7 +180,7 @@ local function validateSession(name, token)
     return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
 end
 
--- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ (ИСПРАВЛЕННАЯ) =====
+-- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ =====
 local WIDTH, HEIGHT = 80, 25
 gpu.setResolution(WIDTH, HEIGHT)
 
@@ -223,7 +223,7 @@ local editMode = false
 local editInput = ""
 local editField = ""
 
--- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ =====
+-- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ (ГЛАВНОЕ ИСПРАВЛЕНИЕ) =====
 local function drawHeader(title)
     write(1, 1, "# " .. (title or "PTM MARKET SERVER"), 0xFFFFFF)
     write(1, 2, "Администрирование", 0x888888)
@@ -238,7 +238,6 @@ local function drawMenu()
         local fg = isSelected and 0xFFFFFF or 0x888888
         local descFg = isSelected and 0xAAAAAA or 0x555555
 
-        -- Формируем строку: либо "## НАЗВАНИЕ", либо "< НАЗАД >"
         local labelPart
         if item.id == "back" then
             labelPart = "< НАЗАД >"
@@ -247,18 +246,15 @@ local function drawMenu()
         end
 
         write(2, y, labelPart, fg)
-
-        -- Описание на той же строке, начиная с позиции 32 (чтобы было как на скриншоте)
         if item.desc and item.desc ~= "" then
             write(32, y, item.desc, descFg)
         end
-
         y = y + 1
     end
     write(2, HEIGHT - 1, "Esc – назад | выберите раздел мыльной", 0x666666)
 end
 
--- ===== РАЗДЕЛ "ИГРОКИ" (без изменений, остаётся рабочим) =====
+-- ===== РАЗДЕЛ "ИГРОКИ" =====
 local function drawPlayers()
     clear()
     drawHeader("ИГРОКИ")
