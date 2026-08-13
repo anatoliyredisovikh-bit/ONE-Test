@@ -37,7 +37,6 @@ local function drawAgreementScreen()
     center(11, "2. Администрация не несёт ответственности за потерю предметов.")
     center(12, "3. Запрещено использование багов и эксплойтов.")
 
-    -- Красная строка (ручной вывод для надёжности)
     gpu.setForeground(0xFF0000)
     local redText = "   Нарушение = перманентная блокировка аккаунта."
     local redX = math.floor((80 - unicode.len(redText))/2) + 1
