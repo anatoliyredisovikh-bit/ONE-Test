@@ -1896,6 +1896,10 @@ local function clearSelectorState()
 end
 
 local function goToHelp()
+    if type(drawAgreementScreen) ~= "function" then
+        showTempMessage("Ошибка загрузки соглашения! Обратитесь к администрации.", 5)
+        return
+    end
     currentScreen = "agreement"
     drawAgreementScreen()
 end
