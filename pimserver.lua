@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (цветная версия)
--- Стиль: тёмный фон, неоновые акценты
+-- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (монохромная версия)
+-- Точная копия интерфейса со скриншота
 -- ============================================================
 
 local component = require("component")
@@ -181,30 +181,12 @@ local function validateSession(name, token)
     return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
 end
 
--- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ (ЦВЕТНАЯ) =====
+-- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ (МОНОХРОМНАЯ) =====
 local WIDTH, HEIGHT = 80, 25
 gpu.setResolution(WIDTH, HEIGHT)
 
--- Цветовая схема
-local COLORS = {
-    bg = 0x0A0A0A,
-    header = 0x00CCFF,
-    subheader = 0x888888,
-    selected = 0x4A90E2,
-    selectedText = 0xFFFFFF,
-    normal = 0xAAAAAA,
-    dim = 0x555555,
-    descSelected = 0xCCCCCC,
-    descNormal = 0x555555,
-    footer = 0x666666,
-    border = 0x3A4A6A,
-    inputBg = 0x1A1A1A,
-    inputText = 0xFFFFFF,
-    highlight = 0xFFAA00,
-}
-
 local function clear()
-    gpu.setBackground(COLORS.bg)
+    gpu.setBackground(0x000000)
     gpu.fill(1, 1, WIDTH, HEIGHT, " ")
 end
 
@@ -216,8 +198,8 @@ local function write(x, y, text, fg)
         x = 1
     end
     if text == "" then return end
-    gpu.setForeground(fg or COLORS.normal)
-    gpu.setBackground(COLORS.bg)
+    gpu.setForeground(fg or 0xFFFFFF)
+    gpu.setBackground(0x000000)
     gpu.set(x, y, unicode.sub(text, 1, WIDTH - x + 1))
 end
 
@@ -245,8 +227,8 @@ local editField = ""
 
 -- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ =====
 local function drawHeader(title)
-    write(1, 1, "# " .. (title or "PIM MARKET SERVER"), COLORS.header)
-    write(1, 2, "Администрирование", COLORS.subheader)
+    write(1, 1, "# " .. (title or "PIM MARKET SERVER"), 0xFFFFFF)
+    write(1, 2, "Администрирование", 0x888888)
 end
 
 local function drawMenu()
@@ -255,36 +237,30 @@ local function drawMenu()
     for i, item in ipairs(menuItems) do
         local y = 4 + i
         local isSelected = (i == selected)
-        local fg = isSelected and COLORS.selectedText or COLORS.normal
-        local descFg = isSelected and COLORS.descSelected or COLORS.descNormal
+        local fg = isSelected and 0xFFFFFF or 0x888888
+        local descFg = isSelected and 0xAAAAAA or 0x555555
         local labelPart
         if item.id == "back" then
             labelPart = "< НАЗАД >"
         else
             labelPart = "## " .. item.label
         end
-        if isSelected then
-            -- Выделяем выбранный пункт цветом
-            write(2, y, labelPart, COLORS.selected)
-            write(35, y, item.desc, COLORS.descSelected)
-        else
-            write(2, y, labelPart, COLORS.normal)
-            write(35, y, item.desc, COLORS.descNormal)
-        end
+        write(2, y, labelPart, fg)
+        write(35, y, item.desc, descFg)
     end
-    write(2, HEIGHT - 1, "Esc – назад | выберите раздел мышью или стрелками", COLORS.footer)
+    write(2, HEIGHT - 1, "Esc – назад | выберите раздел мыкой", 0x666666)
 end
 
 -- ===== РАЗДЕЛ "ИГРОКИ" =====
 local function drawPlayers()
     clear()
     drawHeader("ИГРОКИ")
-    write(1, 4, "Имя", COLORS.subheader)
-    write(22, 4, "Coin", COLORS.subheader)
-    write(35, 4, "ЭМЫ", COLORS.subheader)
-    write(48, 4, "Транз.", COLORS.subheader)
-    write(58, 4, "Статус", COLORS.subheader)
-    write(70, 4, "Админ", COLORS.subheader)
+    write(1, 4, "Имя", 0x888888)
+    write(22, 4, "Coin", 0x888888)
+    write(35, 4, "ЭМЫ", 0x888888)
+    write(48, 4, "Транз.", 0x888888)
+    write(58, 4, "Статус", 0x888888)
+    write(70, 4, "Админ", 0x888888)
 
     local list = {}
     for name, data in pairs(players) do
@@ -300,27 +276,26 @@ local function drawPlayers()
         local item = list[idx]
         if item then
             local y = 5 + i
-            local fg = (idx == listSelected) and COLORS.selected or COLORS.normal
+            local fg = (idx == listSelected) and 0xFFFFFF or 0xAAAAAA
             write(2, y, unicode.sub(item.name, 1, 18), fg)
             write(22, y, string.format("%.2f", item.data.balance or 0), fg)
             write(35, y, string.format("%.2f", item.data.emaBalance or 0), fg)
             write(48, y, string.format("%d", item.data.transactions or 0), fg)
             local status = item.data.banned and "ЗАБАНЕН" or "АКТИВЕН"
-            local statusColor = item.data.banned and 0xFF5555 or 0x55FF55
-            write(58, y, status, statusColor)
-            write(70, y, isAdmin(item.name) and "ДА" or "НЕТ", isAdmin(item.name) and COLORS.highlight or COLORS.dim)
+            write(58, y, status, fg)
+            write(70, y, isAdmin(item.name) and "ДА" or "НЕТ", fg)
         end
     end
 
-    write(1, HEIGHT - 3, "B - бан/разбан | E - редактировать Coin | M - редактировать ЭМЫ | A - админ/снять", COLORS.footer)
-    write(1, HEIGHT - 2, "↑↓ выбор | Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 3, "B - бан/разбан | E - редактировать Coin | M - редактировать ЭМЫ | A - админ/снять", 0x888888)
+    write(1, HEIGHT - 2, "↑↓ выбор | Esc - назад", 0x888888)
 
     if editMode then
-        write(20, 12, "┌──────────────────────────────────────────┐", COLORS.border)
-        write(20, 13, "│  Редактирование баланса                  │", COLORS.border)
-        write(20, 14, "│  " .. editField .. ": " .. editInput .. "_" .. string.rep(" ", 30 - unicode.len(editField) - unicode.len(editInput)), COLORS.inputText)
-        write(20, 15, "│  Enter - подтвердить | Esc - отмена     │", COLORS.footer)
-        write(20, 16, "└──────────────────────────────────────────┘", COLORS.border)
+        write(20, 12, "┌──────────────────────────────────────────┐", 0x666666)
+        write(20, 13, "│  Редактирование баланса                  │", 0x666666)
+        write(20, 14, "│  " .. editField .. ": " .. editInput .. "_" .. string.rep(" ", 30 - unicode.len(editField) - unicode.len(editInput)), 0xFFFFFF)
+        write(20, 15, "│  Enter - подтвердить | Esc - отмена     │", 0x888888)
+        write(20, 16, "└──────────────────────────────────────────┘", 0x666666)
     end
 end
 
@@ -404,9 +379,9 @@ end
 -- ===== РАЗДЕЛ "ОТЗЫВЫ" =====
 local function drawFeedbacks()
     clear(); drawHeader("ОТЗЫВЫ")
-    write(1, 4, "Имя", COLORS.subheader)
-    write(18, 4, "Дата", COLORS.subheader)
-    write(40, 4, "Текст", COLORS.subheader)
+    write(1, 4, "Имя", 0x888888)
+    write(18, 4, "Дата", 0x888888)
+    write(40, 4, "Текст", 0x888888)
 
     local feedbacks = {}
     if filesystem.exists("/home/feedbacks.db") then
@@ -429,14 +404,14 @@ local function drawFeedbacks()
         local fb = feedbacks[idx]
         if fb then
             local y = 5 + i
-            local fg = (idx == listSelected) and COLORS.selected or COLORS.normal
+            local fg = (idx == listSelected) and 0xFFFFFF or 0xAAAAAA
             write(2, y, unicode.sub(fb.name or "?", 1, 15), fg)
-            write(18, y, unicode.sub(fb.time or "", 1, 20), COLORS.subheader)
+            write(18, y, unicode.sub(fb.time or "", 1, 20), 0x888888)
             write(40, y, unicode.sub(fb.text or "", 1, 37), fg)
         end
     end
 
-    write(1, HEIGHT - 3, "D - удалить отзыв | ↑↓ выбор | Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 3, "D - удалить отзыв | ↑↓ выбор | Esc - назад", 0x888888)
 end
 
 local function handleFeedbacks(key, char)
@@ -504,10 +479,10 @@ local function drawJournal()
     for i = 1, 16 do
         local idx = #lines - listScroll - i + 2
         if idx >= 1 and idx <= #lines then
-            write(2, 5 + i, unicode.sub(lines[idx], 1, 76), COLORS.normal)
+            write(2, 5 + i, unicode.sub(lines[idx], 1, 76), 0xAAAAAA)
         end
     end
-    write(1, HEIGHT - 2, "Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 2, "Esc - назад", 0x888888)
 end
 
 local function handleJournal(key, char)
@@ -530,10 +505,10 @@ local function drawStats()
         {"Администраторов:", tostring(#admins)},
     }
     for i, stat in ipairs(statsData) do
-        write(10, 5 + i*2, stat[1], COLORS.subheader)
-        write(35, 5 + i*2, stat[2], COLORS.normal)
+        write(10, 5 + i*2, stat[1], 0x888888)
+        write(35, 5 + i*2, stat[2], 0xFFFFFF)
     end
-    write(1, HEIGHT - 2, "Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 2, "Esc - назад", 0x888888)
 end
 
 local function handleStats(key, char)
@@ -545,17 +520,17 @@ end
 local function drawAdmins()
     clear(); drawHeader("АДМИНИСТРАТОРЫ")
     for i, name in ipairs(admins) do
-        write(3, 5 + i, tostring(i) .. ". " .. name, COLORS.normal)
+        write(3, 5 + i, tostring(i) .. ". " .. name, 0xFFFFFF)
     end
-    write(1, HEIGHT - 4, "A - добавить администратора", COLORS.footer)
-    write(1, HEIGHT - 3, "D - удалить последнего", COLORS.footer)
-    write(1, HEIGHT - 2, "Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 4, "A - добавить администратора", 0x888888)
+    write(1, HEIGHT - 3, "D - удалить последнего", 0x888888)
+    write(1, HEIGHT - 2, "Esc - назад", 0x888888)
     if editMode then
-        write(20, 12, "┌──────────────────────────────────────────┐", COLORS.border)
-        write(20, 13, "│  Введите ник:                             │", COLORS.border)
-        write(20, 14, "│  " .. editInput .. "_" .. string.rep(" ", 40 - unicode.len(editInput)), COLORS.inputText)
-        write(20, 15, "│  Enter - добавить | Esc - отмена        │", COLORS.footer)
-        write(20, 16, "└──────────────────────────────────────────┘", COLORS.border)
+        write(20, 12, "┌──────────────────────────────────────────┐", 0x666666)
+        write(20, 13, "│  Введите ник:                             │", 0x666666)
+        write(20, 14, "│  " .. editInput .. "_" .. string.rep(" ", 40 - unicode.len(editInput)), 0xFFFFFF)
+        write(20, 15, "│  Enter - добавить | Esc - отмена        │", 0x888888)
+        write(20, 16, "└──────────────────────────────────────────┘", 0x666666)
     end
 end
 
@@ -598,10 +573,10 @@ local function drawReports()
         local idx = listScroll + i - 1
         if idx <= #reports then
             local y = 5 + i
-            write(2, y, unicode.sub(reports[idx], 1, 74), (idx == listSelected) and COLORS.selected or COLORS.normal)
+            write(2, y, unicode.sub(reports[idx], 1, 74), (idx == listSelected) and 0xFFFFFF or 0xAAAAAA)
         end
     end
-    write(1, HEIGHT - 3, "D - удалить репорт | ↑↓ выбор | Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 3, "D - удалить репорт | ↑↓ выбор | Esc - назад", 0x888888)
 end
 
 local function handleReports(key, char)
@@ -660,18 +635,18 @@ local function drawAddItem()
     for i, f in ipairs(addItemFields) do
         local y = 5 + i * 2
         local prefix = (i == addItemSelected) and ">" or " "
-        local fg = (i == addItemSelected) and COLORS.selected or COLORS.normal
+        local fg = (i == addItemSelected) and 0xFFFFFF or 0x888888
         write(4, y, prefix .. " " .. f.label, fg)
         write(30, y, f.value, fg)
     end
-    write(1, HEIGHT - 4, "↑↓ выбор поля | Enter - редактировать | S - отправить", COLORS.footer)
-    write(1, HEIGHT - 3, "Esc - назад", COLORS.footer)
+    write(1, HEIGHT - 4, "↑↓ выбор поля | Enter - редактировать | S - отправить", 0x888888)
+    write(1, HEIGHT - 3, "Esc - назад", 0x888888)
     if editMode then
-        write(20, 12, "┌──────────────────────────────────────────┐", COLORS.border)
-        write(20, 13, "│  Введите значение:                       │", COLORS.border)
-        write(20, 14, "│  " .. editInput .. "_" .. string.rep(" ", 40 - unicode.len(editInput)), COLORS.inputText)
-        write(20, 15, "│  Enter - подтвердить | Esc - отмена     │", COLORS.footer)
-        write(20, 16, "└──────────────────────────────────────────┘", COLORS.border)
+        write(20, 12, "┌──────────────────────────────────────────┐", 0x666666)
+        write(20, 13, "│  Введите значение:                       │", 0x666666)
+        write(20, 14, "│  " .. editInput .. "_" .. string.rep(" ", 40 - unicode.len(editInput)), 0xFFFFFF)
+        write(20, 15, "│  Enter - подтвердить | Esc - отмена     │", 0x888888)
+        write(20, 16, "└──────────────────────────────────────────┘", 0x666666)
     end
 end
 
