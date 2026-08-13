@@ -1,6 +1,5 @@
 -- ============================================================
--- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (монохромная версия)
--- Точная копия интерфейса со скриншота
+-- PIM MARKET SERVER + АДМИН-ПАНЕЛЬ (точная копия Screenshot_31)
 -- ============================================================
 
 local component = require("component")
@@ -181,7 +180,7 @@ local function validateSession(name, token)
     return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
 end
 
--- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ (МОНОХРОМНАЯ) =====
+-- ===== ГРАФИЧЕСКАЯ АДМИН-ПАНЕЛЬ (ТОЧНАЯ КОПИЯ) =====
 local WIDTH, HEIGHT = 80, 25
 gpu.setResolution(WIDTH, HEIGHT)
 
@@ -205,7 +204,7 @@ end
 
 -- ===== МЕНЮ =====
 local menuItems = {
-    { id = "players",   label = "ИГРОКИ",          desc = "Балансы, блокировки, транзакции" },
+    { id = "players",   label = "ИГРОВИ",          desc = "Балансы, блокировки, транзакции" },
     { id = "feedbacks", label = "ОТЗЫВЫ",          desc = "Чтение и удаление отзывов" },
     { id = "journal",   label = "ЖУРНАЛ",          desc = "Только важные события" },
     { id = "stats",     label = "СТАТИСТИКА",      desc = "Покупки, продажи, оборот" },
@@ -213,12 +212,11 @@ local menuItems = {
     { id = "pause",     label = "ПРИОСТАНОВИТЬ МАГАЗИН", desc = "Управление доступностью терминалов" },
     { id = "reports",   label = "РЕПОРТЫ",        desc = "Чтение и удаление жалоб" },
     { id = "additem",   label = "ДОБАВИТЬ ПРЕДМЕТ", desc = "Отправить предмет в каталог" },
-    { id = "back",      label = "< НАЗАД >",       desc = "Выход" },
+    { id = "back",      label = "< НАЗАД >",       desc = "" }, -- без описания
 }
 
 local selected = 1
 local currentScreen = "menu"
-local currentList = {}
 local listScroll = 1
 local listSelected = 1
 local editMode = false
@@ -227,7 +225,7 @@ local editField = ""
 
 -- ===== ОТРИСОВКА ГЛАВНОГО МЕНЮ =====
 local function drawHeader(title)
-    write(1, 1, "# " .. (title or "PIM MARKET SERVER"), 0xFFFFFF)
+    write(1, 1, "# " .. (title or "PTM MARKET SERVER"), 0xFFFFFF)
     write(1, 2, "Администрирование", 0x888888)
 end
 
@@ -246,15 +244,17 @@ local function drawMenu()
             labelPart = "## " .. item.label
         end
         write(2, y, labelPart, fg)
-        write(35, y, item.desc, descFg)
+        if item.desc and item.desc ~= "" then
+            write(32, y, item.desc, descFg) -- смещение 32, как на скриншоте
+        end
     end
-    write(2, HEIGHT - 1, "Esc – назад | выберите раздел мыкой", 0x666666)
+    write(2, HEIGHT - 1, "Esc – назад | выберите раздел мыльной", 0x666666)
 end
 
--- ===== РАЗДЕЛ "ИГРОКИ" =====
+-- ===== РАЗДЕЛ "ИГРОКИ" (монохромный) =====
 local function drawPlayers()
     clear()
-    drawHeader("ИГРОКИ")
+    drawHeader("ИГРОВИ")
     write(1, 4, "Имя", 0x888888)
     write(22, 4, "Coin", 0x888888)
     write(35, 4, "ЭМЫ", 0x888888)
