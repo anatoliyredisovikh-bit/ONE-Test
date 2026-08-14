@@ -1,17 +1,15 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 3.0 (интеграция GUI + backend)
+    Версия 3.1 (автоустановка зависимостей)
     ========================================================================
-    Требования:
-      - Библиотека GUI (IgorTimofeev)
-      - Зависимости: doubleBuffering, advancedLua, color, image, OCIF
-    Установка: pastebin run ryhyXUKZ  (или вручную через wget)
+    Скрипт автоматически проверяет наличие библиотек GUI и её зависимостей,
+    и при необходимости скачивает их через HTTP (если интернет доступен).
     ========================================================================
 ]]
 
 -- =====================================================================
---  ПОДКЛЮЧЕНИЕ МОДУЛЕЙ
+--  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ (до проверки зависимостей)
 -- =====================================================================
 local component = require("component")
 local event = require("event")
@@ -22,8 +20,78 @@ local math = require("math")
 local os = require("os")
 local unicode = require("unicode")
 local computer = require("computer")
+local term = require("term")
 
--- Библиотека GUI
+-- =====================================================================
+--  АВТОМАТИЧЕСКАЯ ПРОВЕРКА И УСТАНОВКА ЗАВИСИМОСТЕЙ
+-- =====================================================================
+
+local function ensureDependencies()
+    -- Список необходимых библиотек и ссылки для скачивания (HTTP, т.к. HTTPS может не работать)
+    local deps = {
+        {name = "GUI",          url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/GUI.lua"},
+        {name = "doubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/doubleBuffering.lua"},
+        {name = "color",        url = "http://raw.githubusercontent.com/IgorTimofeev/color/master/color.lua"},
+        {name = "advancedLua",  url = "http://raw.githubusercontent.com/IgorTimofeev/advancedLua/master/advancedLua.lua"},
+        {name = "image",        url = "http://raw.githubusercontent.com/IgorTimofeev/image/master/image.lua"},
+        {name = "OCIF",         url = "http://raw.githubusercontent.com/IgorTimofeev/OCIF/master/OCIF.lua"},
+    }
+
+    -- Создаём папку /lib, если её нет
+    if not filesystem.exists("/lib") then
+        print("Создаю папку /lib...")
+        filesystem.makeDirectory("/lib")
+    end
+
+    -- Проверяем, какие файлы отсутствуют
+    local missing = {}
+    for _, dep in ipairs(deps) do
+        local path = "/lib/" .. dep.name .. ".lua"
+        if not filesystem.exists(path) then
+            table.insert(missing, dep)
+        end
+    end
+
+    if #missing == 0 then
+        print("Все зависимости уже установлены.")
+        return true
+    end
+
+    print("Обнаружены отсутствующие зависимости. Попытка автоматической загрузки...")
+    local success = true
+    for _, dep in ipairs(missing) do
+        print("Загрузка " .. dep.name .. " ...")
+        local command = "wget -f " .. dep.url .. " /lib/" .. dep.name .. ".lua"
+        local result = os.execute(command)
+        if not result then
+            print("❌ Не удалось загрузить " .. dep.name .. " автоматически.")
+            print("Попробуйте установить вручную командой:")
+            print("  " .. command)
+            success = false
+        else
+            print("✅ " .. dep.name .. " установлен.")
+        end
+    end
+
+    if success then
+        print("Все зависимости успешно установлены.")
+        return true
+    else
+        print("❌ Некоторые зависимости не установлены. Скрипт не может продолжить работу.")
+        return false
+    end
+end
+
+-- Запускаем проверку и установку
+if not ensureDependencies() then
+    print("Нажмите любую клавишу для выхода...")
+    computer.pullEvent("key_down")
+    os.exit()
+end
+
+-- =====================================================================
+--  ПОДКЛЮЧЕНИЕ БИБЛИОТЕКИ GUI ПОСЛЕ УСТАНОВКИ
+-- =====================================================================
 local GUI = require("GUI")
 local buffer = require("doubleBuffering")
 
@@ -99,7 +167,6 @@ end
 
 -- Загрузка данных из файлов
 function Server:loadData()
-    -- Игроки
     if filesystem.exists(CONFIG.dbPath) then
         local file = io.open(CONFIG.dbPath, "r")
         local raw = file:read("*a")
@@ -109,7 +176,6 @@ function Server:loadData()
             if success and data then self.players = data end
         end
     end
-    -- Глобальная статистика
     if filesystem.exists(CONFIG.statsPath) then
         local file = io.open(CONFIG.statsPath, "r")
         local raw = file:read("*a")
@@ -123,7 +189,6 @@ function Server:loadData()
             end
         end
     end
-    -- Отзывы
     if filesystem.exists(CONFIG.feedbacksPath) then
         local file = io.open(CONFIG.feedbacksPath, "r")
         local raw = file:read("*a")
@@ -137,7 +202,6 @@ function Server:loadData()
     end
 end
 
--- Сохранение данных
 function Server:savePlayers()
     local file = io.open(CONFIG.dbPath, "w")
     file:write(serialization.serialize(self.players))
@@ -156,7 +220,6 @@ function Server:saveFeedbacks()
     file:close()
 end
 
--- Получить или создать игрока
 function Server:getOrCreatePlayer(name)
     if not self.players[name] then
         self.players[name] = {
@@ -173,20 +236,17 @@ function Server:getOrCreatePlayer(name)
     return self.players[name]
 end
 
--- Проверка сессии
 function Server:validateSession(name, token)
     local s = self.sessions[name]
     return s and s.token == token and os.time() - (s.lastAction or 0) < self.SESSION_TIMEOUT
 end
 
--- Логирование в журнал (важные события)
 function Server:log(msg)
     local line = "[" .. getRealDateTimeString() .. "] " .. msg
     print(line)
-    -- Запись в файл журнала (можно добавить)
+    -- Можно также писать в файл журнала, но оставим для краткости
 end
 
--- Обработка входящих модемных сообщений
 function Server:handleMessage(from, port, raw)
     local success, msg = pcall(serialization.unserialize, raw)
     if not success or not msg or type(msg) ~= "table" then
@@ -196,7 +256,6 @@ function Server:handleMessage(from, port, raw)
     local op = msg.op
     local responsePort = 0xffef
 
-    -- Регистрация администратора или терминала
     if op == "register" then
         if msg.password ~= self.password then
             self.modem.send(from, responsePort, serialization.serialize({op="error", message="Неверный пароль"}))
@@ -218,7 +277,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Вход игрока
     if op == "enter" then
         if self.shopPaused then
             self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
@@ -258,7 +316,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Получение данных аккаунта
     if op == "getAccount" then
         if not self:validateSession(msg.name, msg.token) then
             self.modem.send(from, responsePort, serialization.serialize({op="accountData", error=true, message="Токен устарел"}))
@@ -280,7 +337,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Продажа (пополнение баланса)
     if op == "sell" then
         if self.shopPaused then
             self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
@@ -306,7 +362,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Покупка (списание баланса)
     if op == "buy" then
         if self.shopPaused then
             self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
@@ -331,7 +386,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Репорт (жалоба)
     if op == "report" then
         if not self:validateSession(msg.name, msg.token) then
             self:log("Неверный токен для report")
@@ -349,7 +403,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Согласие с правилами
     if op == "agree" then
         if not self:validateSession(msg.name, msg.token) then
             self.modem.send(from, responsePort, serialization.serialize({op="agree", error=true, message="Токен устарел"}))
@@ -368,7 +421,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Получение отзывов
     if op == "get_feedbacks" then
         if not self:validateSession(msg.name, msg.token) then
             self.modem.send(from, responsePort, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
@@ -383,7 +435,6 @@ function Server:handleMessage(from, port, raw)
         return
     end
 
-    -- Добавление отзыва
     if op == "add_feedback" then
         if not self:validateSession(msg.name, msg.token) then
             self.modem.send(from, responsePort, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
@@ -414,11 +465,10 @@ end
 
 local server = Server.new()
 
--- Создаём приложение на весь экран
 local app = GUI.application()
 app:addChild(GUI.panel(1, 1, app.width, app.height, 0x000000))
 
--- Верхняя панель (заголовок, статус, время)
+-- Верхняя панель
 local topPanel = app:addChild(GUI.panel(1, 1, app.width, 1, 0x000000))
 local titleLabel = topPanel:addChild(GUI.label(1, 1, 20, 1, 0xFFFFFF, "PIM MARKET SERVER"))
 local statusLabel = topPanel:addChild(GUI.label(app.width - 30, 1, 30, 1, 0xFFFFFF, ""))
@@ -430,10 +480,9 @@ local function updateStatus()
     statusLabel.color = color
 end
 
--- Контейнер для меню (сетка 3x3)
+-- Меню
 local menuContainer = app:addChild(GUI.container(1, 3, app.width, 14))
 
--- Данные для блоков меню
 local menuData = {
     { id = "players",    label = "ИГРОКИ",           sublabel = "Балансы, блокировки, транзакции", color = CONFIG.colors.players },
     { id = "stats",      label = "СТАТИСТИКА",       sublabel = "Покупки, продажи, оборот",        color = CONFIG.colors.stats },
@@ -445,7 +494,6 @@ local menuData = {
     { id = "storeStatus",label = "ПРИОСТАНОВИТЬ МАГАЗИН", sublabel = "Управление доступностью терминалов", color = CONFIG.colors.storeStatus },
 }
 
--- Параметры сетки
 local cols, rows = 3, 3
 local blockW, blockH = 24, 4
 local gapX, gapY = 4, 2
@@ -453,7 +501,6 @@ local totalWidth = blockW * cols + gapX * (cols - 1)
 local startX = math.floor((app.width - totalWidth) / 2)
 local startY = 1
 
--- Функция создания блока меню (используем GUI.button с кастомизацией)
 local function createMenuBlock(x, y, w, h, color, label, sublabel, sectionId)
     local panel = menuContainer:addChild(GUI.panel(x, y, w, h, 0x000000))
     panel.borderColor = color
@@ -483,7 +530,6 @@ local function createMenuBlock(x, y, w, h, color, label, sublabel, sectionId)
     return panel
 end
 
--- Создаём блоки
 for i, data in ipairs(menuData) do
     local row = math.floor((i - 1) / cols)
     local col = (i - 1) % cols
@@ -492,10 +538,9 @@ for i, data in ipairs(menuData) do
     createMenuBlock(x, y, blockW, blockH, data.color, data.label, data.sublabel, data.id)
 end
 
--- Контейнер для содержимого разделов (центральная область)
+-- Центральная область для содержимого
 local contentContainer = app:addChild(GUI.container(1, 18, app.width, app.height - 20))
 
--- Функция отображения раздела
 local function showSection(sectionId)
     contentContainer:deleteChildren()
     local panel = contentContainer:addChild(GUI.panel(1, 1, contentContainer.width, contentContainer.height, 0x000000))
@@ -505,22 +550,18 @@ local function showSection(sectionId)
         local fg = 0xFFFFFF
         local bg = 0x000000
 
-        -- Раздел "Игроки"
         if sectionId == "players" then
             buffer.text(2, y, fg, bg, "=== ИГРОКИ ===")
             y = y + 1
             for name, data in pairs(server.players) do
                 local line = name .. " | Баланс: " .. data.balance .. " | Заблокирован: " .. tostring(data.banned)
                 buffer.text(2, y, fg, bg, line)
-                y = y + 1
-                -- Кнопки управления (добавляем прямо в панель как дочерние объекты)
                 local btnBlock = panel:addChild(GUI.button(50, y, 12, 1, 0xE74C3C, 0xFFFFFF, 0xC0392B, 0xFFFFFF, data.banned and "Разблок." or "Заблок."))
                 btnBlock.onTouch = function()
                     data.banned = not data.banned
                     server:savePlayers()
                     showSection(sectionId)
                 end
-                -- Кнопка пополнения баланса
                 local btnAdd = panel:addChild(GUI.button(65, y, 12, 1, 0x2ECC71, 0xFFFFFF, 0x27AE60, 0xFFFFFF, "+ Баланс"))
                 btnAdd.onTouch = function()
                     local input = GUI.inputBox(app, "Пополнение баланса", "Введите сумму:", "", true)
@@ -531,7 +572,6 @@ local function showSection(sectionId)
                     end
                 end
                 y = y + 1
-                -- Транзакции (последние 3)
                 local tcount = data.transactions or 0
                 if tcount > 0 then
                     buffer.text(4, y, fg, bg, "Транзакций: " .. tcount)
@@ -539,7 +579,6 @@ local function showSection(sectionId)
                 end
                 y = y + 1
             end
-        -- Статистика
         elseif sectionId == "stats" then
             buffer.text(2, y, fg, bg, "=== СТАТИСТИКА ===")
             y = y + 1
@@ -550,11 +589,9 @@ local function showSection(sectionId)
             buffer.text(2, y, fg, bg, "Оборот:   " .. (server.globalStats.totalBuys + server.globalStats.totalSells))
             y = y + 1
             buffer.text(2, y, fg, bg, "Репортов: " .. server.globalStats.totalReports)
-        -- Репорты
         elseif sectionId == "reports" then
             buffer.text(2, y, fg, bg, "=== РЕПОРТЫ (ЖАЛОБЫ) ===")
             y = y + 1
-            -- Читаем из файла reports.log
             local reports = {}
             if filesystem.exists(CONFIG.reportsLog) then
                 local file = io.open(CONFIG.reportsLog, "r")
@@ -569,10 +606,8 @@ local function showSection(sectionId)
             else
                 for i, line in ipairs(reports) do
                     buffer.text(2, y, fg, bg, line)
-                    -- Кнопка "Разрешить" (просто удаляем строку)
                     local btn = panel:addChild(GUI.button(60, y, 12, 1, 0x2ECC71, 0xFFFFFF, 0x27AE60, 0xFFFFFF, "Разрешить"))
                     btn.onTouch = function()
-                        -- Удаляем эту строку из файла
                         local newContent = ""
                         for j, l in ipairs(reports) do
                             if j ~= i then newContent = newContent .. l .. "\n" end
@@ -586,7 +621,6 @@ local function showSection(sectionId)
                     if y > contentContainer.height - 2 then break end
                 end
             end
-        -- Отзывы
         elseif sectionId == "reviews" then
             buffer.text(2, y, fg, bg, "=== ОТЗЫВЫ ===")
             y = y + 1
@@ -606,13 +640,11 @@ local function showSection(sectionId)
                     if y > contentContainer.height - 2 then break end
                 end
             end
-        -- Администраторы
         elseif sectionId == "admins" then
             buffer.text(2, y, fg, bg, "=== АДМИНИСТРАТОРЫ ===")
             y = y + 1
             buffer.text(2, y, fg, bg, "Главный админ: " .. server.adminName)
             y = y + 1
-            -- Можно добавить других админов (в данной версии только один)
             local btnAdd = panel:addChild(GUI.button(2, y, 18, 1, 0x3498DB, 0xFFFFFF, 0x2980B9, 0xFFFFFF, "Сменить пароль"))
             btnAdd.onTouch = function()
                 local input = GUI.inputBox(app, "Смена пароля", "Введите новый пароль:", "", true)
@@ -621,7 +653,6 @@ local function showSection(sectionId)
                     showSection(sectionId)
                 end
             end
-        -- Добавить предмет
         elseif sectionId == "addItem" then
             buffer.text(2, y, fg, bg, "=== ДОБАВИТЬ ПРЕДМЕТ ===")
             y = y + 1
@@ -635,16 +666,12 @@ local function showSection(sectionId)
                     showSection(sectionId)
                 end
             end
-        -- Журнал
         elseif sectionId == "journal" then
             buffer.text(2, y, fg, bg, "=== ЖУРНАЛ СОБЫТИЙ ===")
             y = y + 1
-            -- Для демонстрации показываем последние события из лога (можно хранить в памяти)
             buffer.text(2, y, fg, bg, "Последние события сервера:")
             y = y + 1
-            -- Здесь можно читать файл журнала, если ведётся
             buffer.text(2, y, fg, bg, " (функция в разработке)")
-        -- Приостановить магазин
         elseif sectionId == "storeStatus" then
             local status = server.shopPaused and "ЗАКРЫТ" or "ОТКРЫТ"
             buffer.text(2, y, fg, bg, "=== ПРИОСТАНОВИТЬ МАГАЗИН ===")
@@ -663,7 +690,7 @@ local function showSection(sectionId)
     buffer.draw()
 end
 
--- Нижняя панель (кнопка "НАЗАД" и подсказка)
+-- Нижняя панель
 local bottomPanel = app:addChild(GUI.panel(1, app.height, app.width, 1, 0x000000))
 local backButton = bottomPanel:addChild(GUI.button(1, 1, 12, 1, 0xFFFFFF, 0x000000, 0xAAAAAA, 0x000000, "< НАЗАД"))
 backButton.onTouch = function()
@@ -680,7 +707,7 @@ local timeTimer = event.timer(1, function()
     buffer.draw()
 end, math.huge)
 
--- Обработчик событий приложения (перехватываем модемные сообщения)
+-- Обработчик модемных сообщений
 app.eventHandler = function(application, object, eventType, ...)
     if eventType == "modem_message" then
         local _, _, from, port, _, _, raw = ...
@@ -691,25 +718,19 @@ app.eventHandler = function(application, object, eventType, ...)
 end
 
 -- =====================================================================
---  ЗАПУСК ПРИЛОЖЕНИЯ
+--  ЗАПУСК
 -- =====================================================================
 
 local function main()
-    -- Установка разрешения
     if gpu then
         gpu.setResolution(CONFIG.windowWidth, CONFIG.windowHeight)
     end
-
-    -- Первоначальная отрисовка
     updateStatus()
     app:draw()
     buffer.draw()
-
-    -- Запуск обработки событий (блокирующий)
     app:start()
 end
 
--- Запуск с обработкой ошибок
 local ok, err = pcall(main)
 if not ok then
     term.clear()
@@ -723,5 +744,4 @@ if not ok then
     computer.pullEvent("key_down")
 end
 
--- Отмена таймера при выходе
 event.cancel(timeTimer)
