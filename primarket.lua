@@ -1,6 +1,6 @@
 -- ============================================================
 -- PRIMARKET – клиент для PIM MARKET SERVER
--- Версия 2.0 – с поддержкой синхронизации каталога
+-- Версия 2.1 – исправлены артефакты (полная перерисовка)
 -- ============================================================
 
 local component = require("component")
@@ -175,7 +175,7 @@ local function drawScreenBorder()
 end
 
 -- ================================================================
--- ЗАГРУЗКА КАТАЛОГА (ОБНОВЛЕНО)
+-- ЗАГРУЗКА КАТАЛОГА
 -- ================================================================
 local shopData = safeDoFile("/home/shop_items.lua")
 local sellItems = shopData.sellItems or {}
@@ -298,7 +298,7 @@ local tempMessage = ""
 local tempMessageTimer = nil
 
 -- ================================================================
--- ФУНКЦИЯ ОБНОВЛЕНИЯ КАТАЛОГА (НОВАЯ)
+-- ФУНКЦИЯ ОБНОВЛЕНИЯ КАТАЛОГА
 -- ================================================================
 local function updateSellCatalog(newItems)
     if type(newItems) ~= "table" then
@@ -325,7 +325,6 @@ local function updateSellCatalog(newItems)
         return sortableName(a.displayName) < sortableName(b.displayName)
     end)
     writeDebugLog("📦 Каталог обновлён, позиций: " .. #shopItems)
-    -- Сохраняем в файл для постоянства
     local file = io.open("/home/shop_items.lua", "w")
     if file then
         file:write("local items = {}\n")
@@ -340,9 +339,6 @@ local function updateSellCatalog(newItems)
     end
 end
 
--- ================================================================
--- ФУНКЦИЯ ЗАПРОСА КАТАЛОГА (НОВАЯ)
--- ================================================================
 local function requestCatalog()
     if not currentToken then
         writeDebugLog("⚠️ Нет токена для запроса каталога")
@@ -356,9 +352,6 @@ local function requestCatalog()
     writeDebugLog("📤 Запрос каталога отправлен")
 end
 
--- ================================================================
--- ФУНКЦИЯ ПРИНУДИТЕЛЬНОЙ СИНХРОНИЗАЦИИ (НОВАЯ)
--- ================================================================
 local function forceSyncCatalog()
     if not currentToken then
         showTempMessage("Сначала войдите в аккаунт!", 2)
@@ -374,7 +367,7 @@ local function forceSyncCatalog()
 end
 
 -- ================================================================
--- ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ (ОБНОВЛЕНО)
+-- ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
 -- ================================================================
 local function handleModemMessage(from, port, raw)
     local ok, msg = pcall(serialization.unserialize, raw)
@@ -382,7 +375,6 @@ local function handleModemMessage(from, port, raw)
         return
     end
 
-    -- Обработка push-уведомлений от сервера
     if msg.op == "push" then
         local action = msg.action
         local data = msg.data
@@ -399,7 +391,6 @@ local function handleModemMessage(from, port, raw)
         return
     end
 
-    -- Обработка ответа на запрос каталога
     if msg.op == "catalog_data" then
         if msg.catalog == "sell" then
             writeDebugLog("📥 Получен ответ на запрос каталога, позиций: " .. #(msg.items or {}))
@@ -413,11 +404,9 @@ local function handleModemMessage(from, port, raw)
         return
     end
 
-    -- Обработка ответа на синхронизацию
     if msg.op == "sync_catalog_response" then
         if msg.success then
             showTempMessage("✅ Синхронизация выполнена!", 2)
-            -- Запрашиваем свежий каталог
             requestCatalog()
         else
             showTempMessage("❌ Ошибка синхронизации: " .. (msg.message or "неизвестная"), 2)
@@ -425,7 +414,6 @@ local function handleModemMessage(from, port, raw)
         return
     end
 
-    -- Обработка ответа на вход
     if msg.op == "welcome" then
         if msg.status == "ok" then
             currentToken = msg.token
@@ -437,7 +425,6 @@ local function handleModemMessage(from, port, raw)
             alreadyAuthorized = true
             currentScreen = "menu"
             showTempMessage("✅ Добро пожаловать, " .. currentPlayer .. "!", 2)
-            -- Запрашиваем каталог при входе
             requestCatalog()
             writeDebugLog("🔐 Вход выполнен: " .. currentPlayer)
         elseif msg.owner then
@@ -496,7 +483,7 @@ local function handleModemMessage(from, port, raw)
 end
 
 -- ================================================================
--- ОСТАЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ)
+-- ОСТАЛЬНЫЕ ФУНКЦИИ
 -- ================================================================
 local function updateSelectorDisplay(item)
     if not selector then return end
@@ -1218,39 +1205,6 @@ local function drawBuyItemsList()
     end
 end
 
-local function smoothScroll(steps)
-    local filtered = filteredItems
-    local total = #filtered
-    local maxScroll = math.max(1, total - visibleRows + 1)
-    local newScroll = listScroll + steps
-    newScroll = math.max(1, math.min(newScroll, maxScroll))
-    if newScroll == listScroll then return end
-    if math.abs(steps) == 1 and total > visibleRows then
-        if steps > 0 then
-            gpu.copy(2, 8, 76, visibleRows - 1, 0, -1)
-            gpu.setBackground(colors.bg_main)
-            gpu.fill(2, 21, 76, 1, " ")
-            local newIdx = newScroll + visibleRows - 1
-            if newIdx <= total then
-                drawSingleRow(21, filtered[newIdx], (newIdx == hoveredIndex), (newIdx == selectedIndex), newIdx)
-            end
-        else
-            gpu.copy(2, 7, 76, visibleRows - 1, 0, 1)
-            gpu.setBackground(colors.bg_main)
-            gpu.fill(2, 7, 76, 1, " ")
-            local newIdx = newScroll
-            if newIdx >= 1 then
-                drawSingleRow(7, filtered[newIdx], (newIdx == hoveredIndex), (newIdx == selectedIndex), newIdx)
-            end
-        end
-    else
-        drawBuyItemsList()
-        return
-    end
-    listScroll = newScroll
-    drawScrollBar()
-end
-
 local function drawBuyButtons()
     if currentShopMode == "buy" then
         nextButton.text = "[ КУПИТЬ ]"
@@ -1371,7 +1325,6 @@ local function drawMainMenu()
     drawFlexButton(menuButtons.shop)
     drawFlexButton(menuButtons.util)
     drawFlexButton(menuButtons.account)
-    -- Добавляем кнопку синхронизации
     local syncBtn = {
         x = 32, xs = 20, y = 21, ys = 3,
         text = " СИНХР.",
@@ -1503,12 +1456,11 @@ local function handleAuthInput(char, code)
 end
 
 -- ================================================================
--- ОСНОВНОЙ ЦИКЛ (ОБНОВЛЕН)
+-- ОСНОВНОЙ ЦИКЛ
 -- ================================================================
 local syncTimer = nil
 local syncInterval = 30  -- секунд
 
--- Таймер для автоматического опроса каталога
 local function startSyncTimer()
     if syncTimer then
         event.cancel(syncTimer)
@@ -1620,7 +1572,6 @@ while true do
                 drawBuyItemsList()
                 drawBuyButtons()
             elseif x >= 32 and x <= 32+20 and y >= 13 and y <= 13+3 then
-                -- Полезности
                 showTempMessage("🛠 Полезности в разработке", 2)
             elseif x >= 32 and x <= 32+20 and y >= 17 and y <= 17+3 then
                 if currentToken then
@@ -1634,7 +1585,6 @@ while true do
                     showTempMessage("❌ Сначала войдите в аккаунт!", 2)
                 end
             elseif x >= 32 and x <= 32+20 and y >= 21 and y <= 21+3 then
-                -- Кнопка синхронизации
                 forceSyncCatalog()
             elseif x >= 4 and x <= 4+unicode.len("[ ПОДДЕРЖКА ]") and y == 24 then
                 showTempMessage("🆘 Поддержка: discord.gg/...", 3)
@@ -1742,33 +1692,28 @@ while true do
                 end
             end
         elseif currentScreen == "purchase" then
-            -- Кнопка [MAX]
             if x >= 44 and x <= 44+5 and y == 8 then
                 purchaseQuantity = purchaseItem.qty or 1
                 drawPurchaseScreen()
             end
-            -- Кнопка [-]
             if x >= 30 and x <= 30+3 and y == 8 then
                 if purchaseQuantity > 1 then
                     purchaseQuantity = purchaseQuantity - 1
                     drawPurchaseScreen()
                 end
             end
-            -- Кнопка [+]
             if x >= 37 and x <= 37+3 and y == 8 then
                 if purchaseQuantity < (purchaseItem.qty or 9999) then
                     purchaseQuantity = purchaseQuantity + 1
                     drawPurchaseScreen()
                 end
             end
-            -- Кнопка ОТМЕНА
             if x >= 20 and x <= 20+12 and y == 24 then
                 currentScreen = "shop_" .. currentShopMode
                 drawBuyStatic()
                 drawBuyItemsList()
                 drawBuyButtons()
             end
-            -- Кнопка ПОДТВЕРДИТЬ
             if x >= 46 and x <= 46+16 and y == 24 then
                 if purchaseItem and purchaseQuantity > 0 then
                     local totalCoin = (purchaseItem.priceCoin or 0) * purchaseQuantity
@@ -1813,7 +1758,6 @@ while true do
                             showTempMessage("❌ Недостаточно средств!", 2)
                         end
                     else
-                        -- Режим продажи (пополнение)
                         local extracted = extractToME(purchaseItem.internalName, purchaseQuantity, purchaseItem.damage or 0)
                         if extracted > 0 then
                             local earned = (purchaseItem.price or 0) * extracted
@@ -1843,7 +1787,6 @@ while true do
             if isButtonClicked(backButton, x, y) then
                 goBackToMenu()
             end
-            -- Кнопка ДОБАВИТЬ
             if x >= 36 and x <= 36+14 and y == 24 then
                 if not playerHasFeedback then
                     feedbackInput = ""
@@ -1853,7 +1796,6 @@ while true do
                     showTempMessage("Вы уже оставляли отзыв!", 2)
                 end
             end
-            -- Кнопки пагинации
             if x >= 59 and x <= 59+7 and y == 24 then
                 if feedbacksPage > 1 then
                     feedbacksPage = feedbacksPage - 1
@@ -1874,7 +1816,11 @@ while true do
     elseif name == "scroll" then
         local direction = ev[5] or 0
         if currentScreen == "shop_buy" or currentScreen == "shop_sell" then
-            smoothScroll(-direction)
+            -- Полная перерисовка вместо smoothScroll для избежания артефактов
+            local total = #filteredItems
+            local maxScroll = math.max(1, total - visibleRows + 1)
+            listScroll = math.max(1, math.min(listScroll - direction, maxScroll))
+            drawBuyItemsList()
         end
     elseif name == "interrupted" then
         if syncTimer then event.cancel(syncTimer) end
@@ -1883,7 +1829,6 @@ while true do
         break
     end
 
-    -- Таймаут авторизации
     if currentScreen == "auth_wait" then
         local now = getRealTimestamp()
         if now - authStartTime > 3 then
@@ -1893,7 +1838,6 @@ while true do
         end
     end
 
-    -- Запускаем таймер синхронизации при первом входе
     if currentToken and not syncTimer then
         startSyncTimer()
     end
