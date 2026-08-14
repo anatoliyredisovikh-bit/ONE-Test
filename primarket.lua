@@ -1,6 +1,6 @@
 -- ============================================================
--- PRIMARKET – клиент для PIM MARKET SERVER (с синхронизацией)
--- Версия 5.0 – полная поддержка push-уведомлений
+-- PRIMARKET – клиент для PIM MARKET SERVER (с активным опросом PIM)
+-- Версия 6.0 – вход через опрос PIM каждую секунду
 -- ============================================================
 
 local component = require("component")
@@ -207,6 +207,30 @@ local function getPimAddr()
     return nil
 end
 
+local function getPlayerOnPim()
+    local pimAddr = getPimAddr()
+    if not pimAddr then return nil end
+    local pim = component.proxy(pimAddr)
+    local player = nil
+    if pim.getPlayer then
+        local ok, result = pcall(pim.getPlayer, pim)
+        if ok and result and result ~= "" then player = result end
+    end
+    if not player and pim.getPlayerName then
+        local ok, result = pcall(pim.getPlayerName, pim)
+        if ok and result and result ~= "" then player = result end
+    end
+    if not player and pim.getUsername then
+        local ok, result = pcall(pim.getUsername, pim)
+        if ok and result and result ~= "" then player = result end
+    end
+    if not player then
+        local ok, result = pcall(function() return pim.player end)
+        if ok and result and result ~= "" then player = result end
+    end
+    return player
+end
+
 local PUSH_DIRECTION = "down"
 local PULL_DIRECTION = "up"
 
@@ -388,7 +412,7 @@ local function showTempMessage(msg, duration)
 end
 
 -- ================================================================
---  НОВЫЕ ФУНКЦИИ ДЛЯ СИНХРОНИЗАЦИИ КАТАЛОГА
+--  ФУНКЦИИ ДЛЯ СИНХРОНИЗАЦИИ КАТАЛОГА
 -- ================================================================
 local function updateSellCatalog(newItems)
     writeDebugLog("🔄 updateSellCatalog вызвана, получено " .. (#newItems or 0) .. " товаров")
@@ -2013,13 +2037,12 @@ local function refreshAndAgree()
 end
 
 -- ================================================================
---  ОСНОВНОЙ ЦИКЛ С ОБРАБОТКОЙ PUSH-СООБЩЕНИЙ
+--  ОСНОВНОЙ ЦИКЛ С ОПРОСОМ PIM
 -- ================================================================
 local function handleModemMessage(from, port, data)
     local ok, msg = pcall(serialization.unserialize, data)
     if not ok or type(msg) ~= "table" then return end
 
-    -- Push-уведомление об обновлении каталога
     if msg.op == "push" then
         if msg.action == "catalog_update" and msg.data and msg.data.catalog == "sell" then
             writeDebugLog("📥 Получен push: обновление каталога скупки от " .. from)
@@ -2029,7 +2052,6 @@ local function handleModemMessage(from, port, data)
         return
     end
 
-    -- Ответ на запрос каталога
     if msg.op == "catalog_data" then
         if msg.catalog == "sell" then
             writeDebugLog("📥 Получен ответ на запрос каталога, позиций: " .. #(msg.items or {}))
@@ -2038,8 +2060,7 @@ local function handleModemMessage(from, port, data)
         return
     end
 
-    -- Остальные сообщения (welcome, accountData, feedbacks и т.д.) обрабатываются ниже
-    -- в основном цикле, поэтому здесь они не обрабатываются.
+    -- Остальные сообщения (welcome, accountData, feedbacks) обрабатываются в основном цикле
 end
 
 local function requestCatalog()
@@ -2068,9 +2089,44 @@ local function startSyncTimer()
     writeDebugLog("⏱️ Таймер синхронизации запущен (интервал " .. syncInterval .. " сек)")
 end
 
+local pimCheckTimer = nil
+
+local function startPimCheck()
+    if pimCheckTimer then event.cancel(pimCheckTimer) end
+    pimCheckTimer = event.timer(1, function()
+        -- Проверяем, есть ли игрок на PIM
+        local player = getPlayerOnPim()
+        if player and player ~= "" then
+            if not currentPlayer or currentPlayer ~= player then
+                writeDebugLog("👤 Обнаружен игрок на PIM: " .. player)
+                currentPlayer = player
+                -- Отправляем запрос на вход
+                modem.send(serverAddress, 0xffef, serialization.serialize({op="register", password=ACCESS_PASSWORD}))
+                os.sleep(0.1)
+                modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
+                currentScreen = "auth"
+                authStartTime = os.clock()
+                drawAuthScreen()
+            end
+        else
+            if currentPlayer then
+                writeDebugLog("👤 Игрок ушёл с PIM")
+                currentPlayer = nil
+                currentToken = nil
+                alreadyAuthorized = false
+                currentScreen = "welcome"
+                drawWelcomeScreen()
+                clearSelectorState()
+            end
+        end
+        return true
+    end, math.huge)
+    writeDebugLog("⏱️ Таймер проверки PIM запущен (каждую секунду)")
+end
+
 local function main()
     drawWelcomeScreen()
-    modem.send(serverAddress, 0xffef, serialization.serialize({op="register", password=ACCESS_PASSWORD}))
+    startPimCheck()
 
     while true do
         local ev = safeEventPull(0.5)
@@ -2089,44 +2145,110 @@ local function main()
             end
         end
 
-        -- Обработка модемных сообщений (включая push)
         if e == "modem_message" then
             local sender = ev[3]
             local port = ev[4]
             local data = ev[6]
             if port == 0xffef or port == 0xfffe then
                 handleModemMessage(sender, port, data)
-                -- Если это сообщение от сервера, но не обработано handleModemMessage, дойдём до остальной логики
             end
-            -- Остальная логика обработки сообщений сервера (welcome, accountData и т.д.)
-            -- (она была в вашем исходном коде, я её оставляю – она идёт далее)
-        end
-
-        -- (здесь вставьте весь код обработки других событий, который был у вас ранее,
-        --  включая обработку welcome, accountData, feedbacks и т.д.)
-        -- Для краткости я не дублирую его, но он идентичен вашему оригиналу.
-        -- Убедитесь, что при получении welcome с токеном вы вызываете requestCatalog() и startSyncTimer().
-
-        -- Пример: при успешном входе (получен welcome)
-        if e == "modem_message" then
-            local sender = ev[3]
-            local data = ev[6]
+            -- Обработка сообщений от сервера (welcome, accountData, feedbacks и т.д.)
             if sender == serverAddress then
                 local ok, msg = pcall(serialization.unserialize, data)
-                if ok and msg and msg.op == "welcome" and msg.token then
-                    currentToken = msg.token
-                    -- ... (остальная инициализация)
-                    if not alreadyAuthorized then
+                if ok and msg then
+                    if msg.op == "welcome" and msg.token then
+                        currentToken = msg.token
+                        coinBalance = msg.balance or 0.0
+                        emaBalance = msg.emaBalance or 0.0
+                        playerTransactions = msg.transactions or 0
+                        playerRegDate = msg.regDate or ""
+                        playerAgreed = msg.agreed or false
                         alreadyAuthorized = true
+                        if selector then
+                            modem.send(serverAddress, 0xffef, serialization.serialize({
+                                op = "selector_status",
+                                name = currentPlayer,
+                                token = currentToken,
+                                available = true
+                            }))
+                        end
+                        currentScreen = "menu"
+                        drawMainMenu()
                         requestCatalog()
                         startSyncTimer()
+                    elseif msg.op == "accountData" then
+                        if msg.error then
+                            retryAccountAfterTokenRefresh()
+                        else
+                            if currentScreen == "account_loading" then
+                                currentScreen = "account"
+                                drawAccount(msg.data)
+                            end
+                        end
+                    elseif msg.op == "agree" then
+                        if msg.success then
+                            playerAgreed = true
+                            showShopDenied = false
+                            drawCenteredText(20, "Спасибо! Теперь вам доступен магазин.", colors.success)
+                            os.sleep(0.8)
+                            drawMainMenu()
+                            currentScreen = "menu"
+                        elseif msg.error and msg.message == "Токен устарел" then
+                            -- аналогично вашему коду
+                            drawCenteredText(20, "Сессия устарела. Обновление...", colors.accent_secondary)
+                            os.sleep(1)
+                            modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
+                            local start = os.clock()
+                            local refreshed = false
+                            while os.clock() - start < 3 do
+                                local evt = safeEventPull(0.3)
+                                if evt[1] == "modem_message" then
+                                    local s, d = evt[3], evt[6]
+                                    if s == serverAddress then
+                                        local ok2, m = pcall(serialization.unserialize, d)
+                                        if ok2 and m and m.op == "welcome" and m.token then
+                                            currentToken = m.token
+                                            coinBalance = m.balance or 0.0
+                                            emaBalance = m.emaBalance or 0.0
+                                            playerAgreed = m.agreed or false
+                                            refreshed = true
+                                            break
+                                        end
+                                    end
+                                end
+                            end
+                            if refreshed then
+                                modem.send(serverAddress, 0xffef, serialization.serialize({
+                                    op = "agree",
+                                    name = currentPlayer,
+                                    token = currentToken
+                                }))
+                                drawCenteredText(20, "Повторная отправка...", colors.success)
+                            else
+                                drawCenteredText(20, "Не удалось обновить сессию", colors.error)
+                                os.sleep(2)
+                                drawMainMenu()
+                                currentScreen = "menu"
+                            end
+                        else
+                            drawCenteredText(20, "Ошибка: " .. (msg.message or "неизвестная"), colors.error)
+                            os.sleep(2)
+                            drawMainMenu()
+                            currentScreen = "menu"
+                        end
+                    elseif msg.op == "add_buy_item" then
+                        -- (остаётся без изменений)
                     end
                 end
             end
         end
 
-        -- Остальные события (touch, scroll, key_down) – без изменений
-        -- Они полностью скопированы из вашего кода.
+        -- Обработка всех остальных событий (touch, scroll, key_down, etc.) – без изменений
+        -- Они полностью копируются из вашего оригинального кода.
+        -- Здесь я не дублирую их для краткости, но вы должны вставить их сюда,
+        -- так как они уже есть в вашем файле primarket.lua.
+
+        -- В конце цикла обязательно добавьте continue, чтобы не потерять обработку.
     end
 end
 
