@@ -1,7 +1,7 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 8.0 – ГЛОБАЛЬНАЯ ЗАГРУЗКА buffer ДЛЯ GUI
+    Версия 9.0 – ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА doubleBuffering ЧЕРЕЗ dofile
     ========================================================================
 ]]
 
@@ -84,19 +84,32 @@ end
 
 -- 1. Определяем глобальную функцию getCurrentScript (требуется GUI)
 getCurrentScript = function()
-    return "/home/pinserver"   -- любой путь, главное чтобы не nil
+    return "/home/pinserver"
 end
 
--- 2. Загружаем doubleBuffering ГЛОБАЛЬНО (библиотека GUI ожидает глобальную переменную buffer)
-buffer = require("doubleBuffering")
+-- 2. Загружаем doubleBuffering принудительно через dofile (обход require)
+local ok, result = pcall(dofile, "/lib/doubleBuffering.lua")
+if not ok then
+    print("❌ Ошибка загрузки doubleBuffering.lua:")
+    print(result)
+    os.exit()
+end
+buffer = result   -- присваиваем глобально
 
--- 3. Загружаем остальные модули (глобально, чтобы не было проблем)
-color = require("color")
-advancedLua = require("advancedLua")   -- если нужно, но не обязательно
-image = require("image")
-OCIF = require("OCIF")
+if not buffer then
+    print("❌ doubleBuffering.lua не вернул объект buffer.")
+    os.exit()
+else
+    print("✅ doubleBuffering загружен глобально как buffer.")
+end
 
--- 4. Теперь подключаем GUI (он уже найдёт buffer)
+-- Загружаем остальные модули глобально (на всякий случай)
+pcall(dofile, "/lib/color.lua")
+pcall(dofile, "/lib/advancedLua.lua")
+pcall(dofile, "/lib/image.lua")
+pcall(dofile, "/lib/OCIF.lua")
+
+-- 3. Теперь подключаем GUI (он уже найдёт глобальный buffer)
 local GUI = require("GUI")
 local serialization = require("serialization")
 
@@ -141,7 +154,7 @@ local function getRealDateTimeString()
 end
 
 -- =====================================================================
---  СЕРВЕРНАЯ ЛОГИКА (BACKEND) – ОСТАЁТСЯ БЕЗ ИЗМЕНЕНИЙ
+--  СЕРВЕРНАЯ ЛОГИКА (BACKEND) – полная, без изменений
 -- =====================================================================
 local Server = {}
 Server.__index = Server
