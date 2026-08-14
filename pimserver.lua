@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.2
--- Исправлен порядок определения функций
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.3
+-- Автоматическая синхронизация каталога скупки с терминалами
 -- ============================================================
 
 local component = require("component")
@@ -33,7 +33,7 @@ local STATS_PATH = "/home/global_stats.db"
 local FEEDBACKS_PATH = "/home/feedbacks.db"
 local REPORTS_LOG = "/home/reports.log"
 local CATALOG_PATH = "/home/catalog.db"
-local SHOP_ITEMS_FILE = "/home/shop_items.lua"
+local SHOP_ITEMS_FILE = "/home/shop_items.lua"   -- только для импорта, если каталог пуст
 
 -- ------------------------------------------------------------------
 -- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -61,16 +61,21 @@ local function trunc(v, w)
 end
 
 -- ------------------------------------------------------------------
--- 3. ГЛОБАЛЬНЫЕ ТАБЛИЦЫ (объявлены до функций сохранения)
+-- 3. ГЛОБАЛЬНЫЕ ТАБЛИЦЫ
 -- ------------------------------------------------------------------
 local players = {}
 local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
 local feedbacks = {}
 local buyCatalog = {}
 local sellCatalog = {}
+local terminals = {}   -- хранение адресов зарегистрированных терминалов
+local sessions = {}
+local owner = nil
+local markets = {}
+local shopPaused = false
 
 -- ------------------------------------------------------------------
--- 4. ФУНКЦИИ СОХРАНЕНИЯ (определены ДО загрузки данных)
+-- 4. ФУНКЦИИ СОХРАНЕНИЯ
 -- ------------------------------------------------------------------
 local function savePlayers()
     local file = io.open(DB_PATH, "w")
@@ -87,14 +92,57 @@ local function saveFeedbacks()
     file:write(serialization.serialize(feedbacks))
     file:close()
 end
+
+-- ------------------------------------------------------------------
+-- 5. ФУНКЦИИ РАССЫЛКИ КАТАЛОГА
+-- ------------------------------------------------------------------
+local function directPush(address, action, data)
+    if address and address ~= "" then
+        modem.send(address, 0xffef, serialization.serialize({op="push", action=action, data=data}))
+    end
+end
+
+local function broadcast(action, data)
+    modem.broadcast(0xffef, serialization.serialize({op="push", action=action, data=data}))
+end
+
+local function broadcastSellCatalog()
+    local data = {
+        action = "catalog_update",
+        catalog = "sell",
+        items = sellCatalog
+    }
+    -- Отправляем всем зарегистрированным терминалам
+    for address, info in pairs(terminals) do
+        directPush(address, "catalog_update", data)
+    end
+    -- Широковещательно для новых терминалов
+    broadcast("catalog_update", data)
+    logEvent("Каталог скупки разослан терминалам")
+end
+
+-- Сохранение каталога с последующей рассылкой
 local function saveCatalog()
     local file = io.open(CATALOG_PATH, "w")
     file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
     file:close()
+    broadcastSellCatalog()
+end
+
+-- Регистрация терминала
+local function registerTerminal(address, id)
+    if not terminals[address] then
+        terminals[address] = { address = address, id = id or "TERM-"..tostring(address):sub(1,8), lastSeen = computer.uptime() }
+        logEvent("Терминал зарегистрирован: " .. address)
+    else
+        terminals[address].lastSeen = computer.uptime()
+    end
+    -- Отправляем текущий каталог новому терминалу
+    directPush(address, "catalog_update", { action = "catalog_update", catalog = "sell", items = sellCatalog })
 end
 
 -- ------------------------------------------------------------------
--- 5. ЗАГРУЗКА ДАННЫХ (выполняется после определения функций сохранения)
+-- 6. ЗАГРУЗКА ДАННЫХ
 -- ------------------------------------------------------------------
 if filesystem.exists(DB_PATH) then
     local file = io.open(DB_PATH, "r")
@@ -143,10 +191,8 @@ if filesystem.exists(CATALOG_PATH) then
     end
 end
 
--- ------------------------------------------------------------------
--- 6. ЗАГРУЗКА ИЗ ФАЙЛА shop_items.lua
--- ------------------------------------------------------------------
-local function loadSellItemsFromFile()
+-- Импорт из shop_items.lua, если каталог пуст
+local function importSellItemsFromFile()
     if not filesystem.exists(SHOP_ITEMS_FILE) then
         return false
     end
@@ -175,13 +221,12 @@ local function loadSellItemsFromFile()
     end
     sellCatalog = newCatalog
     saveCatalog()
-    print("Загружен каталог скупки из " .. SHOP_ITEMS_FILE .. ", позиций: " .. #sellCatalog)
+    print("Импортирован каталог скупки из " .. SHOP_ITEMS_FILE .. ", позиций: " .. #sellCatalog)
     return true
 end
 
--- Если sellCatalog пуст, пробуем загрузить из shop_items.lua, иначе ставим пример
 if #sellCatalog == 0 then
-    if not loadSellItemsFromFile() then
+    if not importSellItemsFromFile() then
         sellCatalog = {
             { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true, maxQty = 0 },
         }
@@ -198,11 +243,6 @@ end
 -- ------------------------------------------------------------------
 -- 7. СЕССИИ И ПОЛЬЗОВАТЕЛИ
 -- ------------------------------------------------------------------
-local sessions = {}
-local owner = nil
-local markets = {}
-local shopPaused = false
-
 local function getOrCreatePlayer(name)
     name = tostring(name)
     if not players[name] then
@@ -250,6 +290,7 @@ local function handleOldRequest(from, port, msg)
         end
         if not owner then owner = from end
         if not markets[from] then markets[from] = true end
+        registerTerminal(from, msg.terminalId)
         modem.send(from, 0xffef, serialization.serialize({op="welcome", owner=(from==owner), shopPaused=shopPaused}))
         logEvent("Терминал зарегистрирован: " .. from)
         return
@@ -406,33 +447,12 @@ local function handleOldRequest(from, port, msg)
         logEvent("📝 Новый отзыв от " .. msg.name .. ": " .. msg.text)
         return
 
-    elseif op == "sync_sell_catalog" then
-        if not isAdmin(from) then
-            modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
-            return
-        end
-        local items = msg.items
-        if type(items) ~= "table" then
-            modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный формат данных"}))
-            return
-        end
-        local newCatalog = {}
-        for _, item in ipairs(items) do
-            table.insert(newCatalog, {
-                displayName = tostring(item.displayName or ""),
-                internalName = tostring(item.internalName or ""),
-                damage = num(item.damage, 0),
-                priceCoin = num(item.price, 0),
-                priceEma = 0,
-                article = tostring(item.internalName):sub(1, 10),
-                enabled = true,
-                maxQty = num(item.qty, 0),
-            })
-        end
-        sellCatalog = newCatalog
-        saveCatalog()
-        logEvent("Админ синхронизировал каталог скупки, позиций: " .. #sellCatalog)
-        modem.send(from, 0xffef, serialization.serialize({op="sync_sell_catalog_response", success=true, count=#sellCatalog}))
+    elseif op == "request_catalog" then
+        modem.send(from, 0xffef, serialization.serialize({
+            op = "catalog_data",
+            catalog = "sell",
+            items = sellCatalog
+        }))
         return
 
     elseif op == "add_catalog_item" then
