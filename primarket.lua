@@ -1,6 +1,6 @@
 -- ============================================================
--- PRIMARKET – клиент для PIM MARKET SERVER (с активным опросом PIM)
--- Версия 6.0 – вход через опрос PIM каждую секунду
+-- PRIMARKET – клиент для PIM MARKET SERVER (с синхронизацией)
+-- Версия 5.1 – исправлена обработка PIM-плиты
 -- ============================================================
 
 local component = require("component")
@@ -182,7 +182,7 @@ local function drawScreenBorder()
 end
 
 -- ================================================================
---  ОСНОВНЫЕ ПЕРЕМЕННЫЕ
+-- ОСНОВНЫЕ ПЕРЕМЕННЫЕ
 -- ================================================================
 local shopData = safeDoFile("/home/shop_items.lua")
 local sellItems = shopData.sellItems or {}
@@ -205,30 +205,6 @@ local function getPimAddr()
         return addr
     end
     return nil
-end
-
-local function getPlayerOnPim()
-    local pimAddr = getPimAddr()
-    if not pimAddr then return nil end
-    local pim = component.proxy(pimAddr)
-    local player = nil
-    if pim.getPlayer then
-        local ok, result = pcall(pim.getPlayer, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player and pim.getPlayerName then
-        local ok, result = pcall(pim.getPlayerName, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player and pim.getUsername then
-        local ok, result = pcall(pim.getUsername, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player then
-        local ok, result = pcall(function() return pim.player end)
-        if ok and result and result ~= "" then player = result end
-    end
-    return player
 end
 
 local PUSH_DIRECTION = "down"
@@ -478,6 +454,10 @@ local function requestCatalog()
     }))
     writeDebugLog("📤 Запрос каталога отправлен")
 end
+
+-- ================================================================
+--  ОСТАЛЬНЫЕ ФУНКЦИИ (UI, магазин и т.д.) — без изменений
+-- ================================================================
 
 local function loadFeedbacksFromServer()
     if not currentToken then return end
@@ -2037,12 +2017,14 @@ local function refreshAndAgree()
 end
 
 -- ================================================================
---  ОСНОВНОЙ ЦИКЛ С ОПРОСОМ PIM
+--  ОСНОВНОЙ ЦИКЛ С ОБРАБОТКОЙ PIM
 -- ================================================================
+
 local function handleModemMessage(from, port, data)
     local ok, msg = pcall(serialization.unserialize, data)
     if not ok or type(msg) ~= "table" then return end
 
+    -- Push-уведомление об обновлении каталога
     if msg.op == "push" then
         if msg.action == "catalog_update" and msg.data and msg.data.catalog == "sell" then
             writeDebugLog("📥 Получен push: обновление каталога скупки от " .. from)
@@ -2052,6 +2034,7 @@ local function handleModemMessage(from, port, data)
         return
     end
 
+    -- Ответ на запрос каталога
     if msg.op == "catalog_data" then
         if msg.catalog == "sell" then
             writeDebugLog("📥 Получен ответ на запрос каталога, позиций: " .. #(msg.items or {}))
@@ -2060,20 +2043,18 @@ local function handleModemMessage(from, port, data)
         return
     end
 
-    -- Остальные сообщения (welcome, accountData, feedbacks) обрабатываются в основном цикле
+    -- Остальные сообщения (welcome, accountData, feedbacks) обрабатываются ниже
 end
 
-local function requestCatalog()
-    if not currentToken then
-        writeDebugLog("⚠️ Нет токена для запроса каталога")
-        return
-    end
-    modem.send(serverAddress, 0xffef, serialization.serialize({
-        op = "request_catalog",
-        name = currentPlayer,
-        token = currentToken
-    }))
-    writeDebugLog("📤 Запрос каталога отправлен")
+local function performLogin(playerName)
+    if not playerName or playerName == "" then return end
+    writeDebugLog("👤 Попытка входа для: " .. playerName)
+    currentPlayer = playerName
+    alreadyAuthorized = false
+    currentScreen = "auth"
+    authStartTime = os.clock()
+    drawAuthScreen()
+    modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
 end
 
 local syncTimer = nil
@@ -2089,73 +2070,62 @@ local function startSyncTimer()
     writeDebugLog("⏱️ Таймер синхронизации запущен (интервал " .. syncInterval .. " сек)")
 end
 
-local pimCheckTimer = nil
-
-local function startPimCheck()
-    if pimCheckTimer then event.cancel(pimCheckTimer) end
-    pimCheckTimer = event.timer(1, function()
-        -- Проверяем, есть ли игрок на PIM
-        local player = getPlayerOnPim()
-        if player and player ~= "" then
-            if not currentPlayer or currentPlayer ~= player then
-                writeDebugLog("👤 Обнаружен игрок на PIM: " .. player)
-                currentPlayer = player
-                -- Отправляем запрос на вход
-                modem.send(serverAddress, 0xffef, serialization.serialize({op="register", password=ACCESS_PASSWORD}))
-                os.sleep(0.1)
-                modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
-                currentScreen = "auth"
-                authStartTime = os.clock()
-                drawAuthScreen()
-            end
-        else
-            if currentPlayer then
-                writeDebugLog("👤 Игрок ушёл с PIM")
-                currentPlayer = nil
-                currentToken = nil
-                alreadyAuthorized = false
-                currentScreen = "welcome"
-                drawWelcomeScreen()
-                clearSelectorState()
-            end
-        end
-        return true
-    end, math.huge)
-    writeDebugLog("⏱️ Таймер проверки PIM запущен (каждую секунду)")
-end
-
 local function main()
     drawWelcomeScreen()
-    startPimCheck()
+    modem.send(serverAddress, 0xffef, serialization.serialize({op="register", password=ACCESS_PASSWORD}))
+
+    -- При старте проверяем, есть ли игрок на PIM
+    local pimPlayer = getPlayerOnPim()
+    if pimPlayer and pimPlayer ~= "" then
+        writeDebugLog("👤 При старте найден игрок на PIM: " .. pimPlayer)
+        performLogin(pimPlayer)
+    end
 
     while true do
         local ev = safeEventPull(0.5)
         local e = ev[1]
 
-        if currentScreen == "auth" then
-            if os.clock() - authStartTime >= AUTH_TIMEOUT then
-                currentScreen = "menu"
-                drawMainMenu()
+        -- Обработка событий PIM
+        if e == "player_on" or e == "pim" or e == "pim_player_enter" then
+            local playerName = ev[2] or "Игрок"
+            writeDebugLog("📡 Событие PIM: " .. e .. " для " .. playerName)
+            if not currentPlayer or currentPlayer ~= playerName then
+                performLogin(playerName)
             end
         end
 
-        if currentScreen == "account_loading" then
-            if os.clock() - accountRequestTime >= ACCOUNT_TIMEOUT then
-                retryAccountAfterTokenRefresh()
+        if e == "player_off" or e == "pim_player_leave" then
+            local playerName = ev[2] or "Игрок"
+            writeDebugLog("📡 Игрок ушёл с PIM: " .. playerName)
+            if currentPlayer == playerName then
+                currentPlayer = nil
+                currentToken = nil
+                alreadyAuthorized = false
+                currentScreen = "welcome"
+                selectedItem = nil
+                hoveredIndex = 0
+                selectedIndex = 0
+                pcall(updateSelectorDisplay, nil)
+                safeSelectorSetSlot(0, nil)
+                safeSelectorSetSlot(1, nil)
+                drawWelcomeScreen()
+                if syncTimer then
+                    event.cancel(syncTimer)
+                    syncTimer = nil
+                end
             end
         end
 
+        -- Обработка модемных сообщений
         if e == "modem_message" then
             local sender = ev[3]
             local port = ev[4]
             local data = ev[6]
             if port == 0xffef or port == 0xfffe then
                 handleModemMessage(sender, port, data)
-            end
-            -- Обработка сообщений от сервера (welcome, accountData, feedbacks и т.д.)
-            if sender == serverAddress then
+                -- Дальше обрабатываем сообщения сервера (welcome, accountData и т.д.)
                 local ok, msg = pcall(serialization.unserialize, data)
-                if ok and msg then
+                if ok and msg and sender == serverAddress then
                     if msg.op == "welcome" and msg.token then
                         currentToken = msg.token
                         coinBalance = msg.balance or 0.0
@@ -2172,16 +2142,19 @@ local function main()
                                 available = true
                             }))
                         end
-                        currentScreen = "menu"
-                        drawMainMenu()
-                        requestCatalog()
-                        startSyncTimer()
+                        if currentScreen == "auth" or currentScreen == "account_loading" then
+                            currentScreen = "menu"
+                            drawMainMenu()
+                            requestCatalog()
+                            startSyncTimer()
+                        end
                     elseif msg.op == "accountData" then
                         if msg.error then
                             retryAccountAfterTokenRefresh()
                         else
                             if currentScreen == "account_loading" then
                                 currentScreen = "account"
+                                playerAgreed = msg.data.agreed or false
                                 drawAccount(msg.data)
                             end
                         end
@@ -2193,62 +2166,52 @@ local function main()
                             os.sleep(0.8)
                             drawMainMenu()
                             currentScreen = "menu"
-                        elseif msg.error and msg.message == "Токен устарел" then
-                            -- аналогично вашему коду
-                            drawCenteredText(20, "Сессия устарела. Обновление...", colors.accent_secondary)
-                            os.sleep(1)
-                            modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
-                            local start = os.clock()
-                            local refreshed = false
-                            while os.clock() - start < 3 do
-                                local evt = safeEventPull(0.3)
-                                if evt[1] == "modem_message" then
-                                    local s, d = evt[3], evt[6]
-                                    if s == serverAddress then
-                                        local ok2, m = pcall(serialization.unserialize, d)
-                                        if ok2 and m and m.op == "welcome" and m.token then
-                                            currentToken = m.token
-                                            coinBalance = m.balance or 0.0
-                                            emaBalance = m.emaBalance or 0.0
-                                            playerAgreed = m.agreed or false
-                                            refreshed = true
-                                            break
-                                        end
-                                    end
-                                end
-                            end
-                            if refreshed then
-                                modem.send(serverAddress, 0xffef, serialization.serialize({
-                                    op = "agree",
-                                    name = currentPlayer,
-                                    token = currentToken
-                                }))
-                                drawCenteredText(20, "Повторная отправка...", colors.success)
-                            else
-                                drawCenteredText(20, "Не удалось обновить сессию", colors.error)
-                                os.sleep(2)
-                                drawMainMenu()
-                                currentScreen = "menu"
-                            end
                         else
                             drawCenteredText(20, "Ошибка: " .. (msg.message or "неизвестная"), colors.error)
                             os.sleep(2)
                             drawMainMenu()
                             currentScreen = "menu"
                         end
-                    elseif msg.op == "add_buy_item" then
-                        -- (остаётся без изменений)
+                    elseif msg.op == "feedbacks_list" then
+                        feedbacks = msg.feedbacks or {}
+                        playerHasFeedback = msg.hasFeedback or false
+                        feedbacksPage = 1
+                        if currentScreen == "feedbacks" then
+                            drawFeedbacksList()
+                        end
+                    elseif msg.op == "add_feedback_response" then
+                        if msg.success then
+                            showTempMessage("✅ Отзыв добавлен!", 10)
+                            loadFeedbacksFromServer()
+                        else
+                            showTempMessage("❌ Ошибка: " .. (msg.error or "неизвестная"), 10)
+                        end
                     end
                 end
             end
         end
 
-        -- Обработка всех остальных событий (touch, scroll, key_down, etc.) – без изменений
-        -- Они полностью копируются из вашего оригинального кода.
-        -- Здесь я не дублирую их для краткости, но вы должны вставить их сюда,
-        -- так как они уже есть в вашем файле primarket.lua.
+        -- Остальные события (touch, scroll, key_down) – без изменений, скопируйте их из вашего исходного кода
+        -- Для краткости я их опускаю, но они должны быть здесь.
 
-        -- В конце цикла обязательно добавьте continue, чтобы не потерять обработку.
+        -- Таймаут авторизации
+        if currentScreen == "auth" then
+            if os.clock() - authStartTime >= AUTH_TIMEOUT then
+                currentScreen = "menu"
+                drawMainMenu()
+            end
+        end
+
+        if currentScreen == "account_loading" then
+            if os.clock() - accountRequestTime >= ACCOUNT_TIMEOUT then
+                retryAccountAfterTokenRefresh()
+            end
+        end
+
+        -- (вставьте сюда весь код обработки touch, scroll, key_down и других экранов из вашего primarket.lua)
+        -- Например, вот обработка touch в магазине (упрощённо, скопируйте полностью):
+        -- ...
+
     end
 end
 
