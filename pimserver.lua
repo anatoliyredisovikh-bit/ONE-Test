@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.0
--- Админ-панель + поддержка shop_items.lua + синхронизация
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.1
+-- Исправлен порядок определения функций
 -- ============================================================
 
 local component = require("component")
@@ -33,7 +33,7 @@ local STATS_PATH = "/home/global_stats.db"
 local FEEDBACKS_PATH = "/home/feedbacks.db"
 local REPORTS_LOG = "/home/reports.log"
 local CATALOG_PATH = "/home/catalog.db"
-local SHOP_ITEMS_FILE = "/home/shop_items.lua"   -- файл от primarket
+local SHOP_ITEMS_FILE = "/home/shop_items.lua"
 
 -- ------------------------------------------------------------------
 -- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -61,7 +61,31 @@ local function trunc(v, w)
 end
 
 -- ------------------------------------------------------------------
--- 3. ЗАГРУЗКА/СОХРАНЕНИЕ ДАННЫХ
+-- 3. ФУНКЦИИ СОХРАНЕНИЯ (определены ДО загрузки данных)
+-- ------------------------------------------------------------------
+local function savePlayers()
+    local file = io.open(DB_PATH, "w")
+    file:write(serialization.serialize(players))
+    file:close()
+end
+local function saveGlobalStats()
+    local file = io.open(STATS_PATH, "w")
+    file:write(serialization.serialize(globalStats))
+    file:close()
+end
+local function saveFeedbacks()
+    local file = io.open(FEEDBACKS_PATH, "w")
+    file:write(serialization.serialize(feedbacks))
+    file:close()
+end
+local function saveCatalog()
+    local file = io.open(CATALOG_PATH, "w")
+    file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
+    file:close()
+end
+
+-- ------------------------------------------------------------------
+-- 4. ЗАГРУЗКА ДАННЫХ (выполняется после определения функций сохранения)
 -- ------------------------------------------------------------------
 local players = {}
 if filesystem.exists(DB_PATH) then
@@ -100,7 +124,6 @@ if filesystem.exists(FEEDBACKS_PATH) then
     end
 end
 
--- Каталог (загружаем из catalog.db или создаём по умолчанию)
 local buyCatalog = {}
 local sellCatalog = {}
 if filesystem.exists(CATALOG_PATH) then
@@ -116,7 +139,9 @@ if filesystem.exists(CATALOG_PATH) then
     end
 end
 
--- Функция загрузки sellCatalog из файла shop_items.lua (если существует)
+-- ------------------------------------------------------------------
+-- 5. ЗАГРУЗКА ИЗ ФАЙЛА shop_items.lua (теперь saveCatalog определена)
+-- ------------------------------------------------------------------
 local function loadSellItemsFromFile()
     if not filesystem.exists(SHOP_ITEMS_FILE) then
         return false
@@ -166,29 +191,8 @@ if #buyCatalog == 0 then
     saveCatalog()
 end
 
-local function savePlayers()
-    local file = io.open(DB_PATH, "w")
-    file:write(serialization.serialize(players))
-    file:close()
-end
-local function saveGlobalStats()
-    local file = io.open(STATS_PATH, "w")
-    file:write(serialization.serialize(globalStats))
-    file:close()
-end
-local function saveFeedbacks()
-    local file = io.open(FEEDBACKS_PATH, "w")
-    file:write(serialization.serialize(feedbacks))
-    file:close()
-end
-local function saveCatalog()
-    local file = io.open(CATALOG_PATH, "w")
-    file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
-    file:close()
-end
-
 -- ------------------------------------------------------------------
--- 4. СЕССИИ И ПОЛЬЗОВАТЕЛИ
+-- 6. СЕССИИ И ПОЛЬЗОВАТЕЛИ
 -- ------------------------------------------------------------------
 local sessions = {}
 local owner = nil
@@ -222,7 +226,7 @@ local function logEvent(msg)
 end
 
 -- ------------------------------------------------------------------
--- 5. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ (расширенная)
+-- 7. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
 -- ------------------------------------------------------------------
 modem.open(0xffef)
 modem.open(0xfffe)
@@ -428,7 +432,6 @@ local function handleOldRequest(from, port, msg)
         modem.send(from, 0xffef, serialization.serialize({op="sync_sell_catalog_response", success=true, count=#sellCatalog}))
         return
 
-    -- НОВОЕ: управление каталогом (добавление/удаление/обновление)
     elseif op == "add_catalog_item" then
         if not isAdmin(from) then
             modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
@@ -518,7 +521,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 6. АДМИН-ПАНЕЛЬ
+-- 8. АДМИН-ПАНЕЛЬ
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -905,7 +908,7 @@ end
 local function reload() loadForm(); ui.activeField = nil; drawAll() end
 
 -- ------------------------------------------------------------------
--- 7. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
+-- 9. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
 -- ------------------------------------------------------------------
 local function action(id)
     if id == "back" then
@@ -1105,7 +1108,7 @@ local function action(id)
 end
 
 -- ------------------------------------------------------------------
--- 8. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
+-- 10. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
 -- ------------------------------------------------------------------
 local function inside(x, y, c) return y == c.y and x >= c.x and x < c.x + c.w end
 local function touch(x, y)
@@ -1188,7 +1191,7 @@ local function key(char, code)
 end
 
 -- ------------------------------------------------------------------
--- 9. ЗАПУСК
+-- 11. ЗАПУСК
 -- ------------------------------------------------------------------
 loadForm()
 drawAll()
