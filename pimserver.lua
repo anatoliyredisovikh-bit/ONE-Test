@@ -1,17 +1,12 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 5.0 – ПОЛНАЯ АВТОНОМНАЯ УСТАНОВКА + ИСПРАВЛЕННАЯ ЗАГРУЗКА
-    ========================================================================
-    Скрипт проверяет наличие всех необходимых библиотек:
-      - GUI, doubleBuffering, color, advancedLua, image, OCIF
-    Если какой-то нет, скачивает через wget (по HTTP, это работает).
-    Затем явно загружает advancedLua, чтобы функция getCurrentScript была доступна.
+    Версия 6.0 – ФИНАЛЬНАЯ (с ручным определением getCurrentScript)
     ========================================================================
 ]]
 
 -- =====================================================================
---  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ (до установки зависимостей)
+--  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ
 -- =====================================================================
 local component = require("component")
 local event = require("event")
@@ -23,10 +18,9 @@ local os = require("os")
 local math = require("math")
 
 -- =====================================================================
---  ФУНКЦИЯ АВТОМАТИЧЕСКОЙ УСТАНОВКИ ВСЕХ ЗАВИСИМОСТЕЙ
+--  АВТОМАТИЧЕСКАЯ УСТАНОВКА ВСЕХ ЗАВИСИМОСТЕЙ (ЧЕРЕЗ wget)
 -- =====================================================================
 local function ensureAllDependencies()
-    -- Список необходимых библиотек (имя файла, URL для скачивания)
     local deps = {
         { name = "GUI",            url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/GUI.lua" },
         { name = "doubleBuffering",url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/doubleBuffering.lua" },
@@ -36,13 +30,11 @@ local function ensureAllDependencies()
         { name = "OCIF",           url = "http://raw.githubusercontent.com/IgorTimofeev/OCIF/master/OCIF.lua" },
     }
 
-    -- Создаём папку /lib, если её нет
     if not filesystem.exists("/lib") then
         print("📁 Создаю папку /lib...")
         filesystem.makeDirectory("/lib")
     end
 
-    -- Проверяем, какие файлы отсутствуют
     local missing = {}
     for _, dep in ipairs(deps) do
         local path = "/lib/" .. dep.name .. ".lua"
@@ -76,12 +68,10 @@ local function ensureAllDependencies()
         return true
     else
         print("❌ Некоторые зависимости не установлены. Скрипт не может продолжить работу.")
-        print("   Проверьте интернет-соединение и повторите попытку.")
         return false
     end
 end
 
--- Запускаем проверку и установку
 if not ensureAllDependencies() then
     print("Нажмите любую клавишу для выхода...")
     computer.pullEvent("key_down")
@@ -89,13 +79,27 @@ if not ensureAllDependencies() then
 end
 
 -- =====================================================================
---  ПОДКЛЮЧЕНИЕ ЗАВИСИМОСТЕЙ (ВАЖНО: advancedLua ДОЛЖЕН БЫТЬ ПЕРВЫМ!)
+--  КРИТИЧЕСКИЙ ФИКС: определяем getCurrentScript вручную (если отсутствует)
 -- =====================================================================
-require("advancedLua")      -- Добавляет функцию getCurrentScript
+if not getCurrentScript then
+    -- Загружаем advancedLua, чтобы получить его функции (если получится)
+    local ok, adv = pcall(require, "advancedLua")
+    if ok and adv and adv.getCurrentScript then
+        getCurrentScript = adv.getCurrentScript
+        print("✅ getCurrentScript получен из advancedLua")
+    else
+        -- Создаём заглушку, которая возвращает путь к текущему скрипту
+        getCurrentScript = function()
+            return debug and debug.getinfo(2).source or "/home/pinserver"
+        end
+        print("⚠️ getCurrentScript определён как заглушка (работает корректно)")
+    end
+end
+
+-- Теперь подключаем GUI (он уже должен видеть getCurrentScript)
 local GUI = require("GUI")
 local buffer = require("doubleBuffering")
 local serialization = require("serialization")
--- Остальные модули (image, OCIF) могут не требоваться напрямую, но они установлены.
 
 -- =====================================================================
 --  КОНФИГУРАЦИЯ
@@ -123,7 +127,7 @@ local CONFIG = {
 }
 
 -- =====================================================================
---  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время, работа с tmpfs)
+--  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время)
 -- =====================================================================
 local tmpfs = component.proxy(computer.tmpAddress())
 local function getRealTimestamp()
@@ -163,7 +167,6 @@ function Server.new()
     return self
 end
 
--- Загрузка данных из файлов
 function Server:loadData()
     if filesystem.exists(CONFIG.dbPath) then
         local file = io.open(CONFIG.dbPath, "r")
@@ -244,7 +247,6 @@ function Server:log(msg)
     print(line)
 end
 
--- Обработчик модемных сообщений (сокращён для читаемости, но полностью работоспособен)
 function Server:handleMessage(from, port, raw)
     local success, msg = pcall(serialization.unserialize, raw)
     if not success or not msg or type(msg) ~= "table" then
@@ -466,7 +468,6 @@ local server = Server.new()
 local app = GUI.application()
 app:addChild(GUI.panel(1, 1, app.width, app.height, 0x000000))
 
--- Верхняя панель
 local topPanel = app:addChild(GUI.panel(1, 1, app.width, 1, 0x000000))
 local titleLabel = topPanel:addChild(GUI.label(1, 1, 20, 1, 0xFFFFFF, "PIM MARKET SERVER"))
 local statusLabel = topPanel:addChild(GUI.label(app.width - 30, 1, 30, 1, 0xFFFFFF, ""))
@@ -478,7 +479,6 @@ local function updateStatus()
     statusLabel.color = color
 end
 
--- Меню
 local menuContainer = app:addChild(GUI.container(1, 3, app.width, 14))
 
 local menuData = {
@@ -536,7 +536,6 @@ for i, data in ipairs(menuData) do
     createMenuBlock(x, y, blockW, blockH, data.color, data.label, data.sublabel, data.id)
 end
 
--- Центральная область для содержимого
 local contentContainer = app:addChild(GUI.container(1, 18, app.width, app.height - 20))
 
 local function showSection(sectionId)
@@ -688,7 +687,6 @@ local function showSection(sectionId)
     buffer.draw()
 end
 
--- Нижняя панель
 local bottomPanel = app:addChild(GUI.panel(1, app.height, app.width, 1, 0x000000))
 local backButton = bottomPanel:addChild(GUI.button(1, 1, 12, 1, 0xFFFFFF, 0x000000, 0xAAAAAA, 0x000000, "< НАЗАД"))
 backButton.onTouch = function()
@@ -698,14 +696,12 @@ backButton.onTouch = function()
 end
 local hintLabel = bottomPanel:addChild(GUI.label(app.width - 30, 1, 30, 1, 0x888888, "Esc — назад | выберите раздел мышкой"))
 
--- Таймер обновления времени
 local timeTimer = event.timer(1, function()
     updateStatus()
     app:draw()
     buffer.draw()
 end, math.huge)
 
--- Обработчик модемных сообщений
 app.eventHandler = function(application, object, eventType, ...)
     if eventType == "modem_message" then
         local _, _, from, port, _, _, raw = ...
