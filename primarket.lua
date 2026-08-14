@@ -1,6 +1,6 @@
 -- ============================================================
--- PRIMARKET – клиент для PIM MARKET SERVER (финальная версия)
--- Версия 6.0 – полная синхронизация + PIM
+-- PRIMARKET – клиент для PIM MARKET SERVER (с синхронизацией)
+-- Версия 7.0 – полная интеграция с серверным каталогом
 -- ============================================================
 
 local component = require("component")
@@ -53,7 +53,9 @@ local function safeEventPull(timeout)
     return result
 end
 
--- Адрес сервера (можно переопределить через файл)
+-- ================================================================
+-- АДРЕС СЕРВЕРА (можно переопределить через файл)
+-- ================================================================
 local serverAddress = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
 local configFile = "/home/server_address.dat"
 if fs.exists(configFile) then
@@ -181,38 +183,27 @@ local function drawScreenBorder()
     gpu.set(right, bottom, "┘")
 end
 
--- ================================================================
--- ФУНКЦИИ РАБОТЫ С PIM
--- ================================================================
+local shopData = safeDoFile("/home/shop_items.lua")
+local sellItems = shopData.sellItems or {}
+local vanillaItems = shopData.vanillaItems or {}
+
+local buyItemsData = safeDoFile("/home/buy_items.lua")
+local buyItemMap = {}
+for _, item in ipairs(buyItemsData) do
+    local dmg = item.damage or 0
+    local key = item.internalName .. ":" .. dmg
+    buyItemMap[key] = item
+end
+
+local drawAgreementScreen = safeDoFile("/home/agreement.lua")
+
+local modem = component.modem
+
 local function getPimAddr()
     for addr in component.list("pim") do
         return addr
     end
     return nil
-end
-
-local function getPlayerOnPim()
-    local pimAddr = getPimAddr()
-    if not pimAddr then return nil end
-    local pim = component.proxy(pimAddr)
-    local player = nil
-    if pim.getPlayer then
-        local ok, result = pcall(pim.getPlayer, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player and pim.getPlayerName then
-        local ok, result = pcall(pim.getPlayerName, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player and pim.getUsername then
-        local ok, result = pcall(pim.getUsername, pim)
-        if ok and result and result ~= "" then player = result end
-    end
-    if not player then
-        local ok, result = pcall(function() return pim.player end)
-        if ok and result and result ~= "" then player = result end
-    end
-    return player
 end
 
 local PUSH_DIRECTION = "down"
@@ -255,7 +246,6 @@ local function safeSelectorSetSlot(slot, stack)
     return ok, result
 end
 
-local modem = component.modem
 modem.open(0xffef)
 modem.open(0xfffe)
 
@@ -273,7 +263,6 @@ local ACCOUNT_TIMEOUT = 3
 local alreadyAuthorized = false
 
 local shopItems = {}
-local sellItems = {}
 local shopSearch = ""
 local searchActive = false
 local searchInput = ""
@@ -318,8 +307,9 @@ local tempMessage = ""
 local tempMessageTimer = nil
 
 -- ================================================================
---  СИНХРОНИЗАЦИЯ КАТАЛОГА
+--  ФУНКЦИИ СИНХРОНИЗАЦИИ КАТАЛОГА (НОВЫЕ)
 -- ================================================================
+
 local function updateSellCatalog(newItems)
     writeDebugLog("🔄 updateSellCatalog вызвана, получено " .. (#newItems or 0) .. " товаров")
     if type(newItems) ~= "table" or #newItems == 0 then
@@ -344,7 +334,7 @@ local function updateSellCatalog(newItems)
         end
     end
     table.sort(sellItems, function(a, b)
-        return (a.displayName or ""):lower() < (b.displayName or ""):lower()
+        return sortableName(a.displayName) < sortableName(b.displayName)
     end)
 
     local file = io.open("/home/shop_items.lua", "w")
@@ -386,7 +376,7 @@ local function requestCatalog()
 end
 
 local syncTimer = nil
-local syncInterval = 15
+local syncInterval = 30
 
 local function startSyncTimer()
     if syncTimer then event.cancel(syncTimer) end
@@ -399,25 +389,9 @@ local function startSyncTimer()
 end
 
 -- ================================================================
---  ЗАГРУЗКА ТОВАРОВ ИЗ ФАЙЛОВ
+--  ОСТАЛЬНЫЕ ФУНКЦИИ (UI, магазин и т.д.) – без изменений
 -- ================================================================
-local shopData = safeDoFile("/home/shop_items.lua")
-sellItems = shopData.sellItems or {}
-local vanillaItems = shopData.vanillaItems or {}
 
-local buyItemsData = safeDoFile("/home/buy_items.lua")
-local buyItemMap = {}
-for _, item in ipairs(buyItemsData) do
-    local dmg = item.damage or 0
-    local key = item.internalName .. ":" .. dmg
-    buyItemMap[key] = item
-end
-
-local drawAgreementScreen = safeDoFile("/home/agreement.lua")
-
--- ================================================================
---  ОСТАЛЬНЫЕ ФУНКЦИИ (UI, магазин и т.д.) – полностью из оригинала
--- ================================================================
 local function updateSelectorDisplay(item)
     if not selector then return end
     if not item then
@@ -615,7 +589,7 @@ end
 
 local menuButtons = {
     shop    = {x=32, xs=20, y=9,  ys=3, text="🛒 Магазин",     tx=6, ty=1, bg=colors.bg_button, fg=colors.accent_main},
-    util    = {x=32, xs=20, y=13, ys=3, text="🛠 Полезности",   tx=5, ty=1, bg=colors.bg_button, fg=colors.accent_main},
+    sync    = {x=32, xs=20, y=13, ys=3, text="🔄 Синхр.",       tx=5, ty=1, bg=colors.bg_button, fg=colors.success},
     account = {x=32, xs=20, y=17, ys=3, text="👤 Аккаунт",      tx=6, ty=1, bg=colors.bg_button, fg=colors.accent_main}
 }
 
@@ -2056,169 +2030,30 @@ local function refreshAndAgree()
 end
 
 -- ================================================================
---  ОСНОВНОЙ ЦИКЛ С ОБРАБОТКОЙ PIM И ВСЕМИ СОБЫТИЯМИ
+--  ОБРАБОТЧИК МОДЕМНЫХ СООБЩЕНИЙ (ДОБАВЛЕНА ОБРАБОТКА PUSH)
 -- ================================================================
-
-local function handleModemMessage(from, port, data)
-    local ok, msg = pcall(serialization.unserialize, data)
-    if not ok or type(msg) ~= "table" then return end
-
-    -- Push-уведомление
-    if msg.op == "push" then
-        if msg.action == "catalog_update" and msg.data and msg.data.catalog == "sell" then
-            writeDebugLog("📥 Получен push: обновление каталога скупки от " .. from)
-            updateSellCatalog(msg.data.items or {})
-            showTempMessage("✅ Каталог обновлён!", 2)
-        end
-        return
-    end
-
-    -- Ответ на запрос каталога
-    if msg.op == "catalog_data" then
-        if msg.catalog == "sell" then
-            writeDebugLog("📥 Получен ответ на запрос каталога, позиций: " .. #(msg.items or {}))
-            updateSellCatalog(msg.items or {})
-        end
-        return
-    end
-
-    -- Остальные сообщения (welcome, accountData, feedbacks) обрабатываются в основном цикле
-    -- Мы не дублируем их здесь, чтобы избежать конфликтов.
-end
-
-local function performLogin(playerName)
-    if not playerName or playerName == "" then return end
-    writeDebugLog("👤 Попытка входа для: " .. playerName)
-    currentPlayer = playerName
-    alreadyAuthorized = false
-    currentScreen = "auth"
-    authStartTime = os.clock()
-    drawAuthScreen()
-    modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
-end
 
 local function main()
     drawWelcomeScreen()
     modem.send(serverAddress, 0xffef, serialization.serialize({op="register", password=ACCESS_PASSWORD}))
 
-    -- При старте проверяем, есть ли игрок на PIM
-    local pimPlayer = getPlayerOnPim()
-    if pimPlayer and pimPlayer ~= "" then
-        writeDebugLog("👤 При старте найден игрок на PIM: " .. pimPlayer)
-        performLogin(pimPlayer)
-    end
-
     while true do
         local ev = safeEventPull(0.5)
         local e = ev[1]
 
-        -- Обработка событий PIM (вход/выход)
-        if e == "player_on" or e == "pim" or e == "pim_player_enter" then
-            local playerName = ev[2] or "Игрок"
-            writeDebugLog("📡 Событие PIM: " .. e .. " для " .. playerName)
-            if not currentPlayer or currentPlayer ~= playerName then
-                performLogin(playerName)
+        if currentScreen == "auth" then
+            if os.clock() - authStartTime >= AUTH_TIMEOUT then
+                currentScreen = "menu"
+                drawMainMenu()
             end
         end
 
-        if e == "player_off" or e == "pim_player_leave" then
-            local playerName = ev[2] or "Игрок"
-            writeDebugLog("📡 Игрок ушёл с PIM: " .. playerName)
-            if currentPlayer == playerName then
-                currentPlayer = nil
-                currentToken = nil
-                alreadyAuthorized = false
-                currentScreen = "welcome"
-                selectedItem = nil
-                hoveredIndex = 0
-                selectedIndex = 0
-                pcall(updateSelectorDisplay, nil)
-                safeSelectorSetSlot(0, nil)
-                safeSelectorSetSlot(1, nil)
-                drawWelcomeScreen()
-                if syncTimer then
-                    event.cancel(syncTimer)
-                    syncTimer = nil
-                end
+        if currentScreen == "account_loading" then
+            if os.clock() - accountRequestTime >= ACCOUNT_TIMEOUT then
+                retryAccountAfterTokenRefresh()
             end
         end
 
-        -- Обработка модемных сообщений (продолжение)
-        if e == "modem_message" then
-            local sender = ev[3]
-            local port = ev[4]
-            local data = ev[6]
-            if port == 0xffef or port == 0xfffe then
-                handleModemMessage(sender, port, data)
-                -- Обработка сообщений от сервера (welcome, accountData и т.д.)
-                local ok, msg = pcall(serialization.unserialize, data)
-                if ok and msg and sender == serverAddress then
-                    if msg.op == "welcome" and msg.token then
-                        currentToken = msg.token
-                        coinBalance = msg.balance or 0.0
-                        emaBalance = msg.emaBalance or 0.0
-                        playerTransactions = msg.transactions or 0
-                        playerRegDate = msg.regDate or ""
-                        playerAgreed = msg.agreed or false
-                        alreadyAuthorized = true
-                        if selector then
-                            modem.send(serverAddress, 0xffef, serialization.serialize({
-                                op = "selector_status",
-                                name = currentPlayer,
-                                token = currentToken,
-                                available = true
-                            }))
-                        end
-                        if currentScreen == "auth" or currentScreen == "account_loading" then
-                            currentScreen = "menu"
-                            drawMainMenu()
-                            requestCatalog()
-                            startSyncTimer()
-                        end
-                    elseif msg.op == "accountData" then
-                        if msg.error then
-                            retryAccountAfterTokenRefresh()
-                        else
-                            if currentScreen == "account_loading" then
-                                currentScreen = "account"
-                                playerAgreed = msg.data.agreed or false
-                                drawAccount(msg.data)
-                            end
-                        end
-                    elseif msg.op == "agree" then
-                        if msg.success then
-                            playerAgreed = true
-                            showShopDenied = false
-                            drawCenteredText(20, "Спасибо! Теперь вам доступен магазин.", colors.success)
-                            os.sleep(0.8)
-                            drawMainMenu()
-                            currentScreen = "menu"
-                        else
-                            drawCenteredText(20, "Ошибка: " .. (msg.message or "неизвестная"), colors.error)
-                            os.sleep(2)
-                            drawMainMenu()
-                            currentScreen = "menu"
-                        end
-                    elseif msg.op == "feedbacks_list" then
-                        feedbacks = msg.feedbacks or {}
-                        playerHasFeedback = msg.hasFeedback or false
-                        feedbacksPage = 1
-                        if currentScreen == "feedbacks" then
-                            drawFeedbacksList()
-                        end
-                    elseif msg.op == "add_feedback_response" then
-                        if msg.success then
-                            showTempMessage("✅ Отзыв добавлен!", 10)
-                            loadFeedbacksFromServer()
-                        else
-                            showTempMessage("❌ Ошибка: " .. (msg.error or "неизвестная"), 10)
-                        end
-                    end
-                end
-            end
-        end
-
-        -- Обработка событий мыши (касания)
         if e == "touch" then
             local x, y = ev[3], ev[4]
 
@@ -2457,9 +2292,13 @@ local function main()
                                 showShopDenied = true
                                 drawMainMenu()
                             end
-                        elseif name == "util" then
-                            showShopDenied = false
-                            goToUtility()
+                        elseif name == "sync" then
+                            if currentToken then
+                                requestCatalog()
+                                showTempMessage("🔄 Запрос синхронизации отправлен", 2)
+                            else
+                                showTempMessage("❌ Сначала войдите в аккаунт!", 2)
+                            end
                         elseif name == "account" then
                             showShopDenied = false
                             goToAccount()
@@ -2596,11 +2435,7 @@ local function main()
                     goto continue
                 end
             end
-            ::continue::
-        end
-
-        -- Обработка прокрутки мыши
-        if e == "scroll" and (currentScreen == "shop_buy" or currentScreen == "shop_sell") then
+        elseif e == "scroll" and (currentScreen == "shop_buy" or currentScreen == "shop_sell") then
             local direction = ev[5]
             local x = ev[3]
             local y = ev[4]
@@ -2611,10 +2446,7 @@ local function main()
                     smoothScroll(-1)
                 end
             end
-        end
-
-        -- Обработка движения мыши (hover)
-        if e == "mouse_move" and (currentScreen == "shop_buy" or currentScreen == "shop_sell") then
+        elseif e == "mouse_move" and (currentScreen == "shop_buy" or currentScreen == "shop_sell") then
             local x, y = ev[3], ev[4]
             if y >= 7 and y <= 21 and x >= 2 and x <= 77 then
                 local rel = y - 6
@@ -2629,101 +2461,297 @@ local function main()
                     drawBuyItemsList()
                 end
             end
-        end
-
-        -- Обработка клавиатуры в режимах ввода
-        if e == "key_down" then
-            if currentScreen == "report" and canSendReport() then
-                local ch = ev[3]
-                if ch == 13 then
-                    drawReportScreen()
-                elseif ch == 8 then
-                    reportInput = unicode.sub(reportInput, 1, -2)
-                    drawReportScreen()
-                elseif ch >= 32 then
-                    reportInput = reportInput .. unicode.char(ch)
-                    drawReportScreen()
+        elseif e == "key_down" and currentScreen == "report" and canSendReport() then
+            local ch = ev[3]
+            if ch == 13 then
+                drawReportScreen()
+            elseif ch == 8 then
+                reportInput = unicode.sub(reportInput, 1, -2)
+                drawReportScreen()
+            elseif ch >= 32 then
+                reportInput = reportInput .. unicode.char(ch)
+                drawReportScreen()
+            end
+        elseif e == "key_down" and (currentScreen == "shop_buy" or currentScreen == "shop_sell") and searchActive then
+            local ch = ev[3]
+            if ch == 13 then
+                shopSearch = searchInput
+                searchActive = false
+                listScroll = 1
+                selectedIndex = 0
+                selectedItem = nil
+                hoveredIndex = 0
+                drawBuyStatic()
+                drawBuyItemsList()
+                drawBuyButtons()
+            elseif ch == 8 then
+                searchInput = unicode.sub(searchInput, 1, -2)
+                shopSearch = searchInput
+                drawBuyStatic()
+                drawBuyItemsList()
+                drawBuyButtons()
+            elseif ch >= 32 then
+                searchInput = searchInput .. unicode.char(ch)
+                shopSearch = searchInput
+                drawBuyStatic()
+                drawBuyItemsList()
+                drawBuyButtons()
+            end
+            goto continue
+        elseif e == "key_down" and currentScreen == "feedback_input" and feedbackEditMode then
+            local ch = ev[3]
+            if ch == 13 then
+                if feedbackInput ~= "" and currentToken then
+                    modem.send(serverAddress, 0xffef, serialization.serialize({
+                        op = "add_feedback",
+                        name = currentPlayer,
+                        token = currentToken,
+                        text = feedbackInput,
+                        time = getRealTimeString()
+                    }))
+                    showTempMessage("✅ Отзыв отправлен! Спасибо!", 10)
                 end
-            elseif (currentScreen == "shop_buy" or currentScreen == "shop_sell") and searchActive then
-                local ch = ev[3]
-                if ch == 13 then
-                    shopSearch = searchInput
-                    searchActive = false
-                    listScroll = 1
-                    selectedIndex = 0
-                    selectedItem = nil
-                    hoveredIndex = 0
-                    drawBuyStatic()
-                    drawBuyItemsList()
-                    drawBuyButtons()
-                elseif ch == 8 then
-                    searchInput = unicode.sub(searchInput, 1, -2)
-                    shopSearch = searchInput
-                    drawBuyStatic()
-                    drawBuyItemsList()
-                    drawBuyButtons()
-                elseif ch >= 32 then
-                    searchInput = searchInput .. unicode.char(ch)
-                    shopSearch = searchInput
-                    drawBuyStatic()
-                    drawBuyItemsList()
-                    drawBuyButtons()
-                end
-                goto continue
-            elseif currentScreen == "feedback_input" and feedbackEditMode then
-                local ch = ev[3]
-                if ch == 13 then
-                    if feedbackInput ~= "" and currentToken then
-                        modem.send(serverAddress, 0xffef, serialization.serialize({
-                            op = "add_feedback",
-                            name = currentPlayer,
-                            token = currentToken,
-                            text = feedbackInput,
-                            time = getRealTimeString()
-                        }))
-                        showTempMessage("✅ Отзыв отправлен! Спасибо!", 10)
-                    end
-                    feedbackEditMode = false
-                    feedbackInput = ""
-                    currentScreen = "feedbacks"
-                    drawFeedbacksList()
-                elseif ch == 8 then
-                    feedbackInput = unicode.sub(feedbackInput, 1, -2)
+                feedbackEditMode = false
+                feedbackInput = ""
+                currentScreen = "feedbacks"
+                drawFeedbacksList()
+            elseif ch == 8 then
+                feedbackInput = unicode.sub(feedbackInput, 1, -2)
+                drawFeedbackInputScreen()
+            elseif ch >= 32 then
+                if unicode.len(feedbackInput) < 200 then
+                    feedbackInput = feedbackInput .. unicode.char(ch)
                     drawFeedbackInputScreen()
-                elseif ch >= 32 then
-                    if unicode.len(feedbackInput) < 200 then
-                        feedbackInput = feedbackInput .. unicode.char(ch)
-                        drawFeedbackInputScreen()
+                end
+            end
+            goto continue
+        -- Обработка событий PIM (вход/выход)
+        elseif e == "player_on" or e == "pim" or e == "pim_player_enter" then
+            local playerName = ev[2] or "Игрок"
+            currentPlayer = playerName:match("^%s*(.-)%s*$") or playerName
+            if alreadyAuthorized then
+                if currentScreen == "auth" or currentScreen == "account_loading" then
+                    currentScreen = "menu"
+                    drawMainMenu()
+                end
+            elseif currentToken then
+                alreadyAuthorized = true
+                if currentScreen == "auth" or currentScreen == "account_loading" then
+                    currentScreen = "menu"
+                    drawMainMenu()
+                end
+            else
+                coinBalance = 0.0
+                emaBalance = 0.0
+                playerAgreed = false
+                currentScreen = "auth"
+                authStartTime = os.clock()
+                drawAuthScreen()
+                modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
+            end
+        elseif e == "player_off" or e == "pim_player_leave" then
+            currentPlayer = nil
+            currentToken = nil
+            alreadyAuthorized = false
+            currentScreen = "welcome"
+            selectedItem = nil
+            hoveredIndex = 0
+            selectedIndex = 0
+            pcall(updateSelectorDisplay, nil)
+            safeSelectorSetSlot(0, nil)
+            safeSelectorSetSlot(1, nil)
+            if syncTimer then
+                event.cancel(syncTimer)
+                syncTimer = nil
+            end
+            drawWelcomeScreen()
+        -- Обработка модемных сообщений (ДОБАВЛЕНА ОБРАБОТКА PUSH)
+        elseif e == "modem_message" then
+            local sender = ev[3]
+            local data = ev[6]
+            if sender == serverAddress then
+                local success, msg = pcall(serialization.unserialize, data)
+                if success and msg then
+                    -- ★★★ НОВЫЙ БЛОК: ПРИЁМ PUSH-УВЕДОМЛЕНИЙ ★★★
+                    if msg.op == "push" then
+                        if msg.action == "catalog_update" and msg.data and msg.data.catalog == "sell" then
+                            writeDebugLog("📥 Получен push: обновление каталога скупки от " .. sender)
+                            updateSellCatalog(msg.data.items or {})
+                            showTempMessage("✅ Каталог обновлён!", 2)
+                        end
+                        goto continue
+                    end
+
+                    -- Остальные сообщения (welcome, accountData и т.д.)
+                    if msg.op == "welcome" and msg.token then
+                        currentToken = msg.token
+                        coinBalance = msg.balance or 0.0
+                        emaBalance = msg.emaBalance or 0.0
+                        playerTransactions = msg.transactions or 0
+                        playerRegDate = msg.regDate or ""
+                        playerAgreed = msg.agreed or false
+                        alreadyAuthorized = true
+                        if selector then
+                            modem.send(serverAddress, 0xffef, serialization.serialize({
+                                op = "selector_status",
+                                name = currentPlayer,
+                                token = currentToken,
+                                available = true
+                            }))
+                        end
+                        if currentScreen == "auth" or currentScreen == "account_loading" then
+                            currentScreen = "menu"
+                            drawMainMenu()
+                            -- ★★★ ЗАПРОС КАТАЛОГА ПРИ ВХОДЕ ★★★
+                            requestCatalog()
+                            startSyncTimer()
+                        end
+                    elseif msg.op == "accountData" then
+                        if msg.error then
+                            retryAccountAfterTokenRefresh()
+                        else
+                            if currentScreen == "account_loading" then
+                                currentScreen = "account"
+                                playerAgreed = msg.data.agreed or false
+                                drawAccount(msg.data)
+                            end
+                        end
+                    elseif msg.op == "agree" then
+                        if msg.success then
+                            playerAgreed = true
+                            showShopDenied = false
+                            drawCenteredText(20, "Спасибо! Теперь вам доступен магазин.", colors.success)
+                            os.sleep(0.8)
+                            drawMainMenu()
+                            currentScreen = "menu"
+                        elseif msg.error and msg.message == "Токен устарел" then
+                            drawCenteredText(20, "Сессия устарела. Обновление...", colors.accent_secondary)
+                            os.sleep(1)
+                            modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
+                            local start = os.clock()
+                            local refreshed = false
+                            while os.clock() - start < 3 do
+                                local evt = safeEventPull(0.3)
+                                if evt[1] == "modem_message" then
+                                    local s, d = evt[3], evt[6]
+                                    if s == serverAddress then
+                                        local ok, m = pcall(serialization.unserialize, d)
+                                        if ok and m and m.op == "welcome" and m.token then
+                                            currentToken = m.token
+                                            coinBalance = m.balance or 0.0
+                                            emaBalance = m.emaBalance or 0.0
+                                            playerAgreed = m.agreed or false
+                                            refreshed = true
+                                            break
+                                        end
+                                    end
+                                elseif evt[1] == "player_off" or evt[1] == "pim_player_leave" then
+                                    break
+                                end
+                            end
+                            if refreshed then
+                                modem.send(serverAddress, 0xffef, serialization.serialize({
+                                    op = "agree",
+                                    name = currentPlayer,
+                                    token = currentToken
+                                }))
+                                drawCenteredText(20, "Повторная отправка...", colors.success)
+                            else
+                                drawCenteredText(20, "Не удалось обновить сессию", colors.error)
+                                os.sleep(2)
+                                drawMainMenu()
+                                currentScreen = "menu"
+                            end
+                        else
+                            drawCenteredText(20, "Ошибка: " .. (msg.message or "неизвестная"), colors.error)
+                            os.sleep(2)
+                            drawMainMenu()
+                            currentScreen = "menu"
+                        end
+                    elseif msg.op == "add_buy_item" then
+                        local ok, err = pcall(function()
+                            local buyItems = dofile("/home/buy_items.lua")
+                            if type(buyItems) ~= "table" then buyItems = {} end
+                            local newItem = {
+                                internalName = msg.internalName,
+                                displayName = msg.displayName,
+                                price_coin = msg.price_coin or 0,
+                                price_ema = msg.price_ema or 0,
+                            }
+                            if msg.damage and msg.damage ~= 0 then
+                                newItem.damage = msg.damage
+                            end
+                            table.insert(buyItems, newItem)
+                            local file = io.open("/home/buy_items.lua", "w")
+                            file:write("return " .. serialization.serialize(buyItems))
+                            file:close()
+                            buyItemsData = dofile("/home/buy_items.lua")
+                            buyItemMap = {}
+                            for _, item in ipairs(buyItemsData) do
+                                local dmg = item.damage or 0
+                                local key = item.internalName .. ":" .. dmg
+                                buyItemMap[key] = item
+                            end
+                            if currentScreen == "shop_buy" then
+                                loadBuyItems()
+                                drawBuyStatic()
+                                drawBuyItemsList()
+                                drawBuyButtons()
+                            end
+                        end)
+                        if ok then
+                            modem.send(sender, 0xffef, serialization.serialize({op = "add_buy_item_response", success = true}))
+                            showTempMessage("✅ Предмет добавлен: " .. msg.displayName, 10)
+                        else
+                            modem.send(sender, 0xffef, serialization.serialize({op = "add_buy_item_response", success = false, error = tostring(err)}))
+                            showTempMessage("❌ Ошибка добавления: " .. tostring(err), 10)
+                        end
+                        goto continue
+                    elseif msg.op == "add_buy_item_response" then
+                        if msg.success then
+                            print("Предмет успешно добавлен на сервере")
+                        else
+                            print("Ошибка добавления предмета: " .. (msg.error or "неизвестная"))
+                        end
+                    elseif msg.op == "reload_buy_items" then
+                        buyItemsData = dofile("/home/buy_items.lua")
+                        buyItemMap = {}
+                        for _, item in ipairs(buyItemsData) do
+                            local dmg = item.damage or 0
+                            local key = item.internalName .. ":" .. dmg
+                            buyItemMap[key] = item
+                        end
+                        if currentScreen == "shop_buy" then
+                            loadBuyItems()
+                            drawBuyStatic()
+                            drawBuyItemsList()
+                            drawBuyButtons()
+                        end
+                        goto continue
+                    elseif msg.op == "feedbacks_list" then
+                        feedbacks = msg.feedbacks or {}
+                        playerHasFeedback = msg.hasFeedback or false
+                        feedbacksPage = 1
+                        if currentScreen == "feedbacks" then
+                            drawFeedbacksList()
+                        end
+                        goto continue
+                    elseif msg.op == "add_feedback_response" then
+                        if msg.success then
+                            showTempMessage("✅ Отзыв добавлен!", 10)
+                            loadFeedbacksFromServer()
+                        else
+                            showTempMessage("❌ Ошибка: " .. (msg.error or "неизвестная"), 10)
+                        end
+                        goto continue
                     end
                 end
-                goto continue
             end
         end
-
-        -- Таймаут авторизации
-        if currentScreen == "auth" then
-            if os.clock() - authStartTime >= AUTH_TIMEOUT then
-                currentScreen = "menu"
-                drawMainMenu()
-            end
-        end
-
-        if currentScreen == "account_loading" then
-            if os.clock() - accountRequestTime >= ACCOUNT_TIMEOUT then
-                retryAccountAfterTokenRefresh()
-            end
-        end
-
-        -- Если токен есть и таймер не запущен – запускаем
-        if currentToken and not syncTimer then
-            startSyncTimer()
-        end
+        ::continue::
     end
 end
 
--- ================================================================
--- ЗАПУСК С ЗАЩИТОЙ ОТ ОШИБОК
--- ================================================================
 local function drawCrashPopup(errText)
     local popupWidth = 50
     local popupHeight = 8
