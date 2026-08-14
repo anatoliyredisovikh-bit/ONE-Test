@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.3
--- Автоматическая синхронизация каталога скупки с терминалами
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.4
+-- Исправлен порядок определения функций (logEvent перенесён выше)
 -- ============================================================
 
 local component = require("component")
@@ -33,7 +33,7 @@ local STATS_PATH = "/home/global_stats.db"
 local FEEDBACKS_PATH = "/home/feedbacks.db"
 local REPORTS_LOG = "/home/reports.log"
 local CATALOG_PATH = "/home/catalog.db"
-local SHOP_ITEMS_FILE = "/home/shop_items.lua"   -- только для импорта, если каталог пуст
+local SHOP_ITEMS_FILE = "/home/shop_items.lua"
 
 -- ------------------------------------------------------------------
 -- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -68,14 +68,22 @@ local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
 local feedbacks = {}
 local buyCatalog = {}
 local sellCatalog = {}
-local terminals = {}   -- хранение адресов зарегистрированных терминалов
+local terminals = {}
 local sessions = {}
 local owner = nil
 local markets = {}
 local shopPaused = false
 
 -- ------------------------------------------------------------------
--- 4. ФУНКЦИИ СОХРАНЕНИЯ
+-- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ (определена РАНЬШЕ всех, кто её использует)
+-- ------------------------------------------------------------------
+local function logEvent(msg)
+    local line = "[" .. getRealDateTimeString() .. "] " .. msg
+    print(line)
+end
+
+-- ------------------------------------------------------------------
+-- 5. ФУНКЦИИ СОХРАНЕНИЯ
 -- ------------------------------------------------------------------
 local function savePlayers()
     local file = io.open(DB_PATH, "w")
@@ -94,7 +102,7 @@ local function saveFeedbacks()
 end
 
 -- ------------------------------------------------------------------
--- 5. ФУНКЦИИ РАССЫЛКИ КАТАЛОГА
+-- 6. ФУНКЦИИ РАССЫЛКИ КАТАЛОГА
 -- ------------------------------------------------------------------
 local function directPush(address, action, data)
     if address and address ~= "" then
@@ -112,11 +120,9 @@ local function broadcastSellCatalog()
         catalog = "sell",
         items = sellCatalog
     }
-    -- Отправляем всем зарегистрированным терминалам
     for address, info in pairs(terminals) do
         directPush(address, "catalog_update", data)
     end
-    -- Широковещательно для новых терминалов
     broadcast("catalog_update", data)
     logEvent("Каталог скупки разослан терминалам")
 end
@@ -137,12 +143,11 @@ local function registerTerminal(address, id)
     else
         terminals[address].lastSeen = computer.uptime()
     end
-    -- Отправляем текущий каталог новому терминалу
     directPush(address, "catalog_update", { action = "catalog_update", catalog = "sell", items = sellCatalog })
 end
 
 -- ------------------------------------------------------------------
--- 6. ЗАГРУЗКА ДАННЫХ
+-- 7. ЗАГРУЗКА ДАННЫХ
 -- ------------------------------------------------------------------
 if filesystem.exists(DB_PATH) then
     local file = io.open(DB_PATH, "r")
@@ -241,7 +246,7 @@ if #buyCatalog == 0 then
 end
 
 -- ------------------------------------------------------------------
--- 7. СЕССИИ И ПОЛЬЗОВАТЕЛИ
+-- 8. СЕССИИ И ПОЛЬЗОВАТЕЛИ
 -- ------------------------------------------------------------------
 local function getOrCreatePlayer(name)
     name = tostring(name)
@@ -264,13 +269,8 @@ local function validateSession(name, token)
     return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
 end
 
-local function logEvent(msg)
-    local line = "[" .. getRealDateTimeString() .. "] " .. msg
-    print(line)
-end
-
 -- ------------------------------------------------------------------
--- 8. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
+-- 9. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
 -- ------------------------------------------------------------------
 modem.open(0xffef)
 modem.open(0xfffe)
@@ -544,7 +544,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 9. АДМИН-ПАНЕЛЬ
+-- 10. АДМИН-ПАНЕЛЬ (полностью без изменений)
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -927,7 +927,7 @@ end
 local function reload() loadForm(); ui.activeField = nil; drawAll() end
 
 -- ------------------------------------------------------------------
--- 10. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
+-- 11. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
 -- ------------------------------------------------------------------
 local function action(id)
     if id == "back" then
@@ -1127,7 +1127,7 @@ local function action(id)
 end
 
 -- ------------------------------------------------------------------
--- 11. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
+-- 12. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
 -- ------------------------------------------------------------------
 local function inside(x, y, c) return y == c.y and x >= c.x and x < c.x + c.w end
 local function touch(x, y)
@@ -1209,7 +1209,7 @@ local function key(char, code)
 end
 
 -- ------------------------------------------------------------------
--- 12. ЗАПУСК
+-- 13. ЗАПУСК
 -- ------------------------------------------------------------------
 loadForm()
 drawAll()
