@@ -1,13 +1,11 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 9.0 – ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА doubleBuffering ЧЕРЕЗ dofile
+    Версия 9.0 – ИСПРАВЛЕННАЯ ГЛОБАЛЬНАЯ ЗАГРУЗКА buffer
     ========================================================================
 ]]
 
--- =====================================================================
---  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ
--- =====================================================================
+-- Подключение системных модулей
 local component = require("component")
 local event = require("event")
 local filesystem = require("filesystem")
@@ -17,9 +15,7 @@ local gpu = component.gpu
 local os = require("os")
 local math = require("math")
 
--- =====================================================================
---  АВТОМАТИЧЕСКАЯ УСТАНОВКА ВСЕХ ЗАВИСИМОСТЕЙ (ЧЕРЕЗ wget)
--- =====================================================================
+-- Функция автоматической установки всех зависимостей
 local function ensureAllDependencies()
     local deps = {
         { name = "GUI",            url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/GUI.lua" },
@@ -78,44 +74,23 @@ if not ensureAllDependencies() then
     os.exit()
 end
 
--- =====================================================================
---  КРИТИЧЕСКИЕ ОБХОДНЫЕ ПУТИ ДЛЯ GUI
--- =====================================================================
-
--- 1. Определяем глобальную функцию getCurrentScript (требуется GUI)
+-- Критические обходные пути для GUI
 getCurrentScript = function()
-    return "/home/pinserver"
+    return "/home/pimserver"
 end
 
--- 2. Загружаем doubleBuffering принудительно через dofile (обход require)
-local ok, result = pcall(dofile, "/lib/doubleBuffering.lua")
-if not ok then
-    print("❌ Ошибка загрузки doubleBuffering.lua:")
-    print(result)
-    os.exit()
-end
-buffer = result   -- присваиваем глобально
+-- ЗАГРУЖАЕМ doubleBuffering ГЛОБАЛЬНО (без local)
+buffer = require("doubleBuffering")
+color = require("color")
+advancedLua = require("advancedLua")
+image = require("image")
+OCIF = require("OCIF")
 
-if not buffer then
-    print("❌ doubleBuffering.lua не вернул объект buffer.")
-    os.exit()
-else
-    print("✅ doubleBuffering загружен глобально как buffer.")
-end
-
--- Загружаем остальные модули глобально (на всякий случай)
-pcall(dofile, "/lib/color.lua")
-pcall(dofile, "/lib/advancedLua.lua")
-pcall(dofile, "/lib/image.lua")
-pcall(dofile, "/lib/OCIF.lua")
-
--- 3. Теперь подключаем GUI (он уже найдёт глобальный buffer)
+-- Теперь подключаем GUI (он уже найдёт buffer)
 local GUI = require("GUI")
 local serialization = require("serialization")
 
--- =====================================================================
---  КОНФИГУРАЦИЯ
--- =====================================================================
+-- Конфигурация
 local CONFIG = {
     colors = {
         players    = 0x9B59B6,
@@ -138,9 +113,7 @@ local CONFIG = {
     timezoneOffset = 3 * 3600,
 }
 
--- =====================================================================
---  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время)
--- =====================================================================
+-- Вспомогательные функции времени
 local tmpfs = component.proxy(computer.tmpAddress())
 local function getRealTimestamp()
     local handle = tmpfs.open("/time", "w")
@@ -153,9 +126,7 @@ local function getRealDateTimeString()
     return os.date("%d.%m.%Y %H:%M:%S", getRealTimestamp())
 end
 
--- =====================================================================
---  СЕРВЕРНАЯ ЛОГИКА (BACKEND) – полная, без изменений
--- =====================================================================
+-- Серверная логика (без изменений)
 local Server = {}
 Server.__index = Server
 
@@ -471,10 +442,7 @@ function Server:handleMessage(from, port, raw)
     end
 end
 
--- =====================================================================
---  GUI-ПРИЛОЖЕНИЕ (АДМИН-ПАНЕЛЬ)
--- =====================================================================
-
+-- GUI-приложение
 local server = Server.new()
 
 local app = GUI.application()
@@ -722,10 +690,6 @@ app.eventHandler = function(application, object, eventType, ...)
         end
     end
 end
-
--- =====================================================================
---  ЗАПУСК
--- =====================================================================
 
 local function main()
     if gpu then
