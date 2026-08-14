@@ -1,11 +1,18 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 4.2 – полностью автономная, все зависимости загружаются
-    автоматически при первом запуске через HTTP.
+    Версия 5.0 – ПОЛНАЯ АВТОНОМНАЯ УСТАНОВКА + ИСПРАВЛЕННАЯ ЗАГРУЗКА
+    ========================================================================
+    Скрипт проверяет наличие всех необходимых библиотек:
+      - GUI, doubleBuffering, color, advancedLua, image, OCIF
+    Если какой-то нет, скачивает через wget (по HTTP, это работает).
+    Затем явно загружает advancedLua, чтобы функция getCurrentScript была доступна.
     ========================================================================
 ]]
 
+-- =====================================================================
+--  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ (до установки зависимостей)
+-- =====================================================================
 local component = require("component")
 local event = require("event")
 local filesystem = require("filesystem")
@@ -13,9 +20,10 @@ local computer = require("computer")
 local term = require("term")
 local gpu = component.gpu
 local os = require("os")
+local math = require("math")
 
 -- =====================================================================
---  АВТОМАТИЧЕСКАЯ УСТАНОВКА ВСЕХ ЗАВИСИМОСТЕЙ
+--  ФУНКЦИЯ АВТОМАТИЧЕСКОЙ УСТАНОВКИ ВСЕХ ЗАВИСИМОСТЕЙ
 -- =====================================================================
 local function ensureAllDependencies()
     -- Список необходимых библиотек (имя файла, URL для скачивания)
@@ -67,7 +75,8 @@ local function ensureAllDependencies()
         print("🎉 Все зависимости успешно установлены!")
         return true
     else
-        print("❌ Некоторые зависимости не установлены. Проверьте интернет-соединение.")
+        print("❌ Некоторые зависимости не установлены. Скрипт не может продолжить работу.")
+        print("   Проверьте интернет-соединение и повторите попытку.")
         return false
     end
 end
@@ -80,11 +89,13 @@ if not ensureAllDependencies() then
 end
 
 -- =====================================================================
---  ПОДКЛЮЧЕНИЕ БИБЛИОТЕКИ GUI
+--  ПОДКЛЮЧЕНИЕ ЗАВИСИМОСТЕЙ (ВАЖНО: advancedLua ДОЛЖЕН БЫТЬ ПЕРВЫМ!)
 -- =====================================================================
+require("advancedLua")      -- Добавляет функцию getCurrentScript
 local GUI = require("GUI")
 local buffer = require("doubleBuffering")
 local serialization = require("serialization")
+-- Остальные модули (image, OCIF) могут не требоваться напрямую, но они установлены.
 
 -- =====================================================================
 --  КОНФИГУРАЦИЯ
@@ -112,7 +123,7 @@ local CONFIG = {
 }
 
 -- =====================================================================
---  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время)
+--  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время, работа с tmpfs)
 -- =====================================================================
 local tmpfs = component.proxy(computer.tmpAddress())
 local function getRealTimestamp()
@@ -127,7 +138,7 @@ local function getRealDateTimeString()
 end
 
 -- =====================================================================
---  СЕРВЕРНАЯ ЛОГИКА
+--  СЕРВЕРНАЯ ЛОГИКА (BACKEND)
 -- =====================================================================
 local Server = {}
 Server.__index = Server
@@ -152,6 +163,7 @@ function Server.new()
     return self
 end
 
+-- Загрузка данных из файлов
 function Server:loadData()
     if filesystem.exists(CONFIG.dbPath) then
         local file = io.open(CONFIG.dbPath, "r")
@@ -232,6 +244,7 @@ function Server:log(msg)
     print(line)
 end
 
+-- Обработчик модемных сообщений (сокращён для читаемости, но полностью работоспособен)
 function Server:handleMessage(from, port, raw)
     local success, msg = pcall(serialization.unserialize, raw)
     if not success or not msg or type(msg) ~= "table" then
@@ -445,7 +458,7 @@ function Server:handleMessage(from, port, raw)
 end
 
 -- =====================================================================
---  GUI-ПРИЛОЖЕНИЕ
+--  GUI-ПРИЛОЖЕНИЕ (АДМИН-ПАНЕЛЬ)
 -- =====================================================================
 
 local server = Server.new()
@@ -523,6 +536,7 @@ for i, data in ipairs(menuData) do
     createMenuBlock(x, y, blockW, blockH, data.color, data.label, data.sublabel, data.id)
 end
 
+-- Центральная область для содержимого
 local contentContainer = app:addChild(GUI.container(1, 18, app.width, app.height - 20))
 
 local function showSection(sectionId)
