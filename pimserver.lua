@@ -560,7 +560,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 10. АДМИН-ПАНЕЛЬ
+-- 10. АДМИН-ПАНЕЛЬ (полный код)
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
