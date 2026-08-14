@@ -1,735 +1,727 @@
--- =============================================================================
--- PIM MARKET SERVER - АДМИН-ПАНЕЛЬ (OpenComputers)
--- Версия 1.0
--- Только стандартные API, без внешних библиотек.
--- Интерфейс: терминальный стиль с цветными рамками, сетка меню 3x3.
--- =============================================================================
+--[[
+    ========================================================================
+    PIM MARKET SERVER – Админ-панель с серверной логикой
+    Версия 3.0 (интеграция GUI + backend)
+    ========================================================================
+    Требования:
+      - Библиотека GUI (IgorTimofeev)
+      - Зависимости: doubleBuffering, advancedLua, color, image, OCIF
+    Установка: pastebin run ryhyXUKZ  (или вручную через wget)
+    ========================================================================
+]]
 
--- =============================================================================
--- БЛОК КОНФИГУРАЦИИ (изменяйте здесь размеры, цвета, отступы)
--- =============================================================================
-local CONFIG = {
-    -- Размеры экрана (можно изменить под свой монитор)
-    screenWidth  = 80,
-    screenHeight = 25,
-
-    -- Цвета рамок (шестнадцатеричные, как в OpenComputers)
-    colors = {
-        players    = 0xAA44FF,  -- фиолетовый
-        stats      = 0x44FF44,  -- зелёный
-        reports    = 0xFF4444,  -- красный
-        reviews    = 0x44FFFF,  -- бирюзовый
-        admins     = 0xFF8800,  -- оранжевый
-        additem    = 0x4488FF,  -- голубой
-        journal    = 0xFFFF44,  -- жёлтый
-        pause      = 0xD2B48C,  -- бежевый / светло-коричневый
-        highlight  = 0xFFFFFF,  -- цвет подсветки при наведении
-        text       = 0xFFFFFF,  -- цвет текста
-        bg         = 0x000000,  -- чёрный фон
-        headerBg   = 0x111111,
-        footerBg   = 0x111111,
-    },
-
-    -- Позиции сетки меню (в символах)
-    grid = {
-        startX = 4,
-        startY = 6,
-        width  = 22,   -- ширина каждого блока
-        height = 5,    -- высота каждого блока
-        gapX   = 4,    -- отступ между блоками по X
-        gapY   = 2,    -- отступ между блоками по Y
-        cols   = 3,
-        rows   = 3,
-    },
-
-    -- Заголовок и статус
-    header = {
-        title      = "PIM MARKET SERVER",
-        statusText = "MARKET ONLINE",
-    },
-
-    -- Нижняя панель
-    footer = {
-        backLabel  = "< НАЗАД",
-        hintText   = "Esc — назад | выберите раздел мышкой",
-    }
-}
-
--- =============================================================================
--- СЕРВЕРНАЯ ЧАСТЬ (backend) – хранение и управление данными
--- =============================================================================
-
--- ---- Инициализация данных (заглушки, чтобы интерфейс не был пустым) ----
-local data = {
-    -- Игроки: имя -> { balance, blocked, transactions, ... }
-    players = {
-        ["ZoziDo"] = { balance = 1500.0, blocked = false, transactions = 42, regDate = "01.01.2024" },
-        ["Kalleront"] = { balance = 320.5, blocked = false, transactions = 12, regDate = "15.02.2024" },
-        ["TestPlayer"] = { balance = 0.0, blocked = true, transactions = 3, regDate = "20.03.2024" },
-    },
-    -- Отзывы: массив { name, text, date }
-    reviews = {
-        { name = "ZoziDo", text = "Отличный магазин!", date = "10.01.2024" },
-        { name = "Kalleront", text = "Быстро и удобно.", date = "20.02.2024" },
-    },
-    -- Жалобы (репорты): массив { name, text, date, resolved = false }
-    reports = {
-        { name = "TestPlayer", text = "Цена на алмазы завышена!", date = "01.03.2024", resolved = false },
-    },
-    -- Журнал событий: массив строк (только важные)
-    journal = {
-        "[01.01.2024] Сервер запущен",
-        "[10.01.2024] ZoziDo пополнил баланс на 1000",
-        "[20.02.2024] Kalleront купил алмаз",
-    },
-    -- Статистика
-    stats = {
-        totalBuys     = 125,
-        totalSells    = 80,
-        totalTurnover = 4520.75,
-    },
-    -- Администраторы (список имён)
-    admins = { "ZoziDo", "Kalleront" },
-    -- Каталог предметов (для добавления)
-    catalog = {},
-    -- Статус магазина (доступность терминалов)
-    storePaused = false,
-}
-
--- ---- Вспомогательные функции для работы с данными ----
-
--- Добавление тестовых данных (имитация активности рынка)
-local function simulateMarketActivity()
-    -- Генерируем случайные транзакции, отзывы, жалобы
-    if math.random(1, 10) > 7 then
-        local names = {"ZoziDo", "Kalleront", "TestPlayer", "Newbie"}
-        local name = names[math.random(#names)]
-        local amount = math.random(10, 200)
-        if data.players[name] then
-            if math.random() > 0.5 then
-                data.players[name].balance = data.players[name].balance + amount
-                table.insert(data.journal, string.format("[%s] %s пополнил баланс на %.2f", os.date("%d.%m.%Y"), name, amount))
-                data.stats.totalSells = data.stats.totalSells + 1
-            else
-                if data.players[name].balance >= amount then
-                    data.players[name].balance = data.players[name].balance - amount
-                    table.insert(data.journal, string.format("[%s] %s совершил покупку на %.2f", os.date("%d.%m.%Y"), name, amount))
-                    data.stats.totalBuys = data.stats.totalBuys + 1
-                end
-            end
-        end
-    end
-    if math.random(1, 20) == 1 then
-        table.insert(data.reviews, { name = "Guest", text = "Отличный сервис!", date = os.date("%d.%m.%Y") })
-    end
-    if math.random(1, 30) == 1 then
-        table.insert(data.reports, { name = "Guest", text = "Баг в магазине!", date = os.date("%d.%m.%Y"), resolved = false })
-    end
-end
-
--- ---- Методы для управления данными (API для интерфейса) ----
-
--- Players
-local function getPlayers()
-    return data.players
-end
-
-local function setBalance(name, amount)
-    if data.players[name] then
-        data.players[name].balance = amount
-        return true
-    end
-    return false
-end
-
-local function blockPlayer(name, blocked)
-    if data.players[name] then
-        data.players[name].blocked = blocked
-        return true
-    end
-    return false
-end
-
--- Reviews
-local function getReviews()
-    return data.reviews
-end
-
-local function deleteReview(index)
-    if data.reviews[index] then
-        table.remove(data.reviews, index)
-        return true
-    end
-    return false
-end
-
--- Journal
-local function getJournal()
-    return data.journal
-end
-
-local function logEvent(msg)
-    table.insert(data.journal, string.format("[%s] %s", os.date("%d.%m.%Y %H:%M"), msg))
-end
-
--- Statistics
-local function getStats()
-    return data.stats
-end
-
-local function recordSale(amount)
-    data.stats.totalSells = data.stats.totalSells + 1
-    data.stats.totalTurnover = data.stats.totalTurnover + amount
-end
-
-local function recordPurchase(amount)
-    data.stats.totalBuys = data.stats.totalBuys + 1
-    data.stats.totalTurnover = data.stats.totalTurnover + amount
-end
-
--- Administrators
-local function getAdmins()
-    return data.admins
-end
-
-local function addAdmin(name)
-    if not name or name == "" then return false end
-    for _, a in ipairs(data.admins) do
-        if a == name then return false end
-    end
-    table.insert(data.admins, name)
-    return true
-end
-
-local function removeAdmin(name)
-    for i, a in ipairs(data.admins) do
-        if a == name then
-            table.remove(data.admins, i)
-            return true
-        end
-    end
-    return false
-end
-
--- Reports
-local function getReports()
-    return data.reports
-end
-
-local function resolveReport(index)
-    if data.reports[index] then
-        data.reports[index].resolved = true
-        return true
-    end
-    return false
-end
-
-local function deleteReport(index)
-    if data.reports[index] then
-        table.remove(data.reports, index)
-        return true
-    end
-    return false
-end
-
--- Items (каталог)
-local function addToCatalog(itemName, price)
-    if itemName and price then
-        table.insert(data.catalog, { name = itemName, price = price })
-        return true
-    end
-    return false
-end
-
--- Store status
-local function getStoreStatus()
-    return data.storePaused
-end
-
-local function toggleStoreStatus()
-    data.storePaused = not data.storePaused
-    return data.storePaused
-end
-
--- =============================================================================
--- КЛИЕНТСКАЯ ЧАСТЬ (frontend) – отрисовка и взаимодействие
--- =============================================================================
-
--- ---- Подключение стандартных API ----
+-- =====================================================================
+--  ПОДКЛЮЧЕНИЕ МОДУЛЕЙ
+-- =====================================================================
 local component = require("component")
-local term = require("term")
 local event = require("event")
-local os = require("os")
-local math = require("math")
-local table = require("table")
-local string = require("string")
-
--- Проверка наличия GPU
+local serialization = require("serialization")
+local filesystem = require("filesystem")
 local gpu = component.gpu
-if not gpu then
-    error("Видеокарта (GPU) не найдена!")
-end
+local math = require("math")
+local os = require("os")
+local unicode = require("unicode")
+local computer = require("computer")
 
--- Устанавливаем разрешение экрана (если возможно)
-local w, h = gpu.getResolution()
-if w < CONFIG.screenWidth or h < CONFIG.screenHeight then
-    gpu.setResolution(CONFIG.screenWidth, CONFIG.screenHeight)
-    w, h = gpu.getResolution()
-    -- Если не удалось установить нужное разрешение, используем текущее
-    CONFIG.screenWidth = w
-    CONFIG.screenHeight = h
-end
+-- Библиотека GUI
+local GUI = require("GUI")
+local buffer = require("doubleBuffering")
 
--- ---- Вспомогательные функции отрисовки ----
-
--- Установка цвета (обёртка для gpu)
-local function setColor(fg, bg)
-    if fg then gpu.setForeground(fg) end
-    if bg then gpu.setBackground(bg) end
-end
-
--- Очистка экрана
-local function clearScreen()
-    gpu.setBackground(CONFIG.colors.bg)
-    gpu.fill(1, 1, CONFIG.screenWidth, CONFIG.screenHeight, " ")
-end
-
--- Рисование рамки вокруг прямоугольной области
-local function drawFrame(x, y, width, height, color, fillColor)
-    -- Верхняя и нижняя границы
-    setColor(color, fillColor or CONFIG.colors.bg)
-    gpu.fill(x, y, width, 1, "─")
-    gpu.fill(x, y + height - 1, width, 1, "─")
-    -- Вертикальные линии
-    for row = y + 1, y + height - 2 do
-        gpu.set(x, row, "│")
-        gpu.set(x + width - 1, row, "│")
-    end
-    -- Углы
-    gpu.set(x, y, "┌")
-    gpu.set(x + width - 1, y, "┐")
-    gpu.set(x, y + height - 1, "└")
-    gpu.set(x + width - 1, y + height - 1, "┘")
-    -- Если задан fillColor, заливаем внутреннюю область
-    if fillColor then
-        gpu.setBackground(fillColor)
-        gpu.fill(x + 1, y + 1, width - 2, height - 2, " ")
-    end
-end
-
--- Рисование текста по центру в заданной области
-local function drawCenteredTextInRect(x, y, width, height, text, fg, bg)
-    local len = #text
-    local tx = x + math.floor((width - len) / 2)
-    local ty = y + math.floor((height - 1) / 2)
-    setColor(fg, bg or CONFIG.colors.bg)
-    gpu.set(tx, ty, text)
-end
-
--- ---- Отрисовка интерфейса ----
-
--- Текущее состояние интерфейса
-local state = {
-    currentScreen = "main",  -- "main" или название раздела
-    selectedIndex = nil,     -- индекс выбранного блока в сетке (1..9)
-    hoverIndex = nil,        -- индекс блока под мышью
-    detailData = nil,        -- данные для отображения в центральной области
-    backCallback = nil,      -- функция для возврата в главное меню
+-- =====================================================================
+--  КОНФИГУРАЦИЯ
+-- =====================================================================
+local CONFIG = {
+    colors = {
+        players    = 0x9B59B6,
+        stats      = 0x2ECC71,
+        reports    = 0xE74C3C,
+        reviews    = 0x1ABC9C,
+        admins     = 0xE67E22,
+        addItem    = 0x3498DB,
+        journal    = 0xF1C40F,
+        storeStatus = 0xBDC3C7,
+    },
+    windowWidth = 80,
+    windowHeight = 25,
+    dbPath = "/home/players.db",
+    statsPath = "/home/global_stats.db",
+    feedbacksPath = "/home/feedbacks.db",
+    reportsLog = "/home/reports.log",
+    password = "admin",
+    adminName = "Kalleront",
+    timezoneOffset = 3 * 3600,
 }
 
--- Определение блоков сетки (8 блоков, 9-й можно оставить пустым или использовать для доп. инфо)
-local gridBlocks = {
-    { id = "players",   label = "ИГРОКИ",        sub = "Балансы, блокировки, транзакции",   color = CONFIG.colors.players },
-    { id = "stats",     label = "СТАТИСТИКА",    sub = "Покупки, продажи, оборот",           color = CONFIG.colors.stats },
-    { id = "reports",   label = "РЕПОРТЫ",       sub = "Чтение и удаление жалоб",            color = CONFIG.colors.reports },
-    { id = "reviews",   label = "ОТЗЫВЫ",        sub = "Чтение и удаление отзывов",          color = CONFIG.colors.reviews },
-    { id = "admins",    label = "АДМИНИСТРАТОРЫ", sub = "Добавить или удалить админа",       color = CONFIG.colors.admins },
-    { id = "additem",   label = "ДОБАВИТЬ ПРЕДМЕТ", sub = "Отправить предмет в каталог",     color = CONFIG.colors.additem },
-    { id = "journal",   label = "ЖУРНАЛ",        sub = "Только важные события",              color = CONFIG.colors.journal },
-    { id = "pause",     label = "ПРИОСТАНОВИТЬ МАГАЗИН", sub = "Управление доступностью терминалов", color = CONFIG.colors.pause },
-    -- 9-й блок можно сделать пустым или дополнительным
-    { id = nil, label = "", sub = "", color = 0x555555 },
-}
-
--- Вычисление координат блоков сетки
-local function getBlockPosition(index)
-    local cfg = CONFIG.grid
-    local row = math.floor((index - 1) / cfg.cols)
-    local col = (index - 1) % cfg.cols
-    local x = cfg.startX + col * (cfg.width + cfg.gapX)
-    local y = cfg.startY + row * (cfg.height + cfg.gapY)
-    return x, y
+-- =====================================================================
+--  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время, работа с tmpfs)
+-- =====================================================================
+local tmpfs = component.proxy(computer.tmpAddress())
+local function getRealTimestamp()
+    local handle = tmpfs.open("/time", "w")
+    tmpfs.write(handle, "time")
+    tmpfs.close(handle)
+    return tmpfs.lastModified("/time") / 1000 + CONFIG.timezoneOffset
 end
 
--- Рисование верхней панели (заголовок, статус, время)
-local function drawHeader()
-    local title = CONFIG.header.title
-    local status = CONFIG.header.statusText
-    local timeStr = os.date("%H:%M:%S")
-
-    -- Фон панели
-    gpu.setBackground(CONFIG.colors.headerBg)
-    gpu.fill(1, 1, CONFIG.screenWidth, 2, " ")
-
-    -- Заголовок (слева)
-    setColor(CONFIG.colors.text, CONFIG.colors.headerBg)
-    gpu.set(2, 1, title)
-
-    -- Статус и время (справа)
-    local statusLine = status .. " | " .. timeStr
-    local rightX = CONFIG.screenWidth - #statusLine - 1
-    setColor(CONFIG.colors.text, CONFIG.colors.headerBg)
-    gpu.set(rightX, 1, statusLine)
+local function getRealTimeString()
+    return os.date("%H:%M:%S", getRealTimestamp())
 end
 
--- Рисование сетки меню (блоки)
-local function drawMenuGrid(hoverIndex)
-    for i = 1, #gridBlocks do
-        local block = gridBlocks[i]
-        if block.id then
-            local x, y = getBlockPosition(i)
-            local color = block.color
-            -- Если блок под мышью, меняем цвет рамки на подсветку
-            local frameColor = (hoverIndex == i) and CONFIG.colors.highlight or color
-            local fillColor = CONFIG.colors.bg
+local function getRealDateTimeString()
+    return os.date("%d.%m.%Y %H:%M:%S", getRealTimestamp())
+end
 
-            -- Рисуем рамку
-            drawFrame(x, y, CONFIG.grid.width, CONFIG.grid.height, frameColor, fillColor)
+-- =====================================================================
+--  СЕРВЕРНАЯ ЛОГИКА (BACKEND)
+-- =====================================================================
+local Server = {}
+Server.__index = Server
 
-            -- Рисуем текст (название и подзаголовок)
-            local label = block.label
-            local sub = block.sub
-            setColor(CONFIG.colors.text, CONFIG.colors.bg)
-            -- Название по центру выше
-            local labelY = y + 1
-            drawCenteredTextInRect(x, labelY, CONFIG.grid.width, 2, label, CONFIG.colors.text, CONFIG.colors.bg)
-            -- Подзаголовок чуть ниже
-            local subY = y + 3
-            if #sub > CONFIG.grid.width - 2 then
-                sub = sub:sub(1, CONFIG.grid.width - 5) .. "…"
+function Server.new()
+    local self = setmetatable({}, Server)
+    self.players = {}
+    self.globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
+    self.sessions = {}
+    self.feedbacks = {}
+    self.markets = {}
+    self.owner = nil
+    self.marketConnected = false
+    self.shopPaused = false
+    self.adminName = CONFIG.adminName
+    self.password = CONFIG.password
+    self.SESSION_TIMEOUT = 31536000
+    self.modem = component.modem
+    self.modem.open(0xffef)
+    self.modem.open(0xfffe)
+    self:loadData()
+    return self
+end
+
+-- Загрузка данных из файлов
+function Server:loadData()
+    -- Игроки
+    if filesystem.exists(CONFIG.dbPath) then
+        local file = io.open(CONFIG.dbPath, "r")
+        local raw = file:read("*a")
+        file:close()
+        if raw and #raw > 0 then
+            local success, data = pcall(serialization.unserialize, raw)
+            if success and data then self.players = data end
+        end
+    end
+    -- Глобальная статистика
+    if filesystem.exists(CONFIG.statsPath) then
+        local file = io.open(CONFIG.statsPath, "r")
+        local raw = file:read("*a")
+        file:close()
+        if raw and #raw > 0 then
+            local success, data = pcall(serialization.unserialize, raw)
+            if success and data then
+                self.globalStats.totalReports = data.totalReports or 0
+                self.globalStats.totalBuys = data.totalBuys or 0
+                self.globalStats.totalSells = data.totalSells or 0
             end
-            drawCenteredTextInRect(x, subY, CONFIG.grid.width, 1, sub, 0x888888, CONFIG.colors.bg)
-        else
-            -- Пустой блок (просто фон)
-            local x, y = getBlockPosition(i)
-            gpu.setBackground(CONFIG.colors.bg)
-            gpu.fill(x, y, CONFIG.grid.width, CONFIG.grid.height, " ")
+        end
+    end
+    -- Отзывы
+    if filesystem.exists(CONFIG.feedbacksPath) then
+        local file = io.open(CONFIG.feedbacksPath, "r")
+        local raw = file:read("*a")
+        file:close()
+        if raw and #raw > 0 then
+            local success, data = pcall(serialization.unserialize, raw)
+            if success and type(data) == "table" then
+                self.feedbacks = data
+            end
         end
     end
 end
 
--- Рисование центральной области (для деталей раздела)
-local function drawCentralArea(contentLines, actions)
-    -- Очищаем центральную область (под сеткой)
-    local startY = CONFIG.grid.startY + CONFIG.grid.rows * (CONFIG.grid.height + CONFIG.grid.gapY) + 1
-    local height = CONFIG.screenHeight - startY - 3 -- оставляем место для футера
-    gpu.setBackground(CONFIG.colors.bg)
-    gpu.fill(2, startY, CONFIG.screenWidth - 3, height, " ")
+-- Сохранение данных
+function Server:savePlayers()
+    local file = io.open(CONFIG.dbPath, "w")
+    file:write(serialization.serialize(self.players))
+    file:close()
+end
 
-    if not contentLines or #contentLines == 0 then
-        setColor(0x888888, CONFIG.colors.bg)
-        gpu.set(4, startY + 2, "Нет данных")
+function Server:saveGlobalStats()
+    local file = io.open(CONFIG.statsPath, "w")
+    file:write(serialization.serialize(self.globalStats))
+    file:close()
+end
+
+function Server:saveFeedbacks()
+    local file = io.open(CONFIG.feedbacksPath, "w")
+    file:write(serialization.serialize(self.feedbacks))
+    file:close()
+end
+
+-- Получить или создать игрока
+function Server:getOrCreatePlayer(name)
+    if not self.players[name] then
+        self.players[name] = {
+            balance = 0.0,
+            transactions = 0,
+            regDate = getRealDateTimeString(),
+            agreed = false,
+            banned = false,
+            hasFeedback = false
+        }
+        self:savePlayers()
+        self:log("Создан игрок " .. name)
+    end
+    return self.players[name]
+end
+
+-- Проверка сессии
+function Server:validateSession(name, token)
+    local s = self.sessions[name]
+    return s and s.token == token and os.time() - (s.lastAction or 0) < self.SESSION_TIMEOUT
+end
+
+-- Логирование в журнал (важные события)
+function Server:log(msg)
+    local line = "[" .. getRealDateTimeString() .. "] " .. msg
+    print(line)
+    -- Запись в файл журнала (можно добавить)
+end
+
+-- Обработка входящих модемных сообщений
+function Server:handleMessage(from, port, raw)
+    local success, msg = pcall(serialization.unserialize, raw)
+    if not success or not msg or type(msg) ~= "table" then
         return
     end
 
-    -- Выводим содержимое
-    for i, line in ipairs(contentLines) do
-        if i > height - 2 then break end
-        setColor(CONFIG.colors.text, CONFIG.colors.bg)
-        gpu.set(4, startY + i, line)
-    end
+    local op = msg.op
+    local responsePort = 0xffef
 
-    -- Если есть действия (кнопки), рисуем их внизу центральной области
-    if actions then
-        -- Просто пример: можно рисовать кнопки, но для простоты оставим как есть
-    end
-end
-
--- Рисование нижней панели (кнопка назад, подсказка)
-local function drawFooter()
-    local y = CONFIG.screenHeight
-    gpu.setBackground(CONFIG.colors.footerBg)
-    gpu.fill(1, y, CONFIG.screenWidth, 1, " ")
-
-    -- Кнопка "< НАЗАД"
-    setColor(CONFIG.colors.text, CONFIG.colors.footerBg)
-    gpu.set(2, y, CONFIG.footer.backLabel)
-
-    -- Подсказка справа
-    local hint = CONFIG.footer.hintText
-    local hintX = CONFIG.screenWidth - #hint - 1
-    gpu.set(hintX, y, hint)
-end
-
--- ---- Обработчики разделов ----
-
--- Функция для отображения раздела "ИГРОКИ"
-local function showPlayers()
-    local players = getPlayers()
-    local lines = {}
-    for name, info in pairs(players) do
-        local status = info.blocked and "ЗАБЛОКИРОВАН" or "АКТИВЕН"
-        local line = string.format("%-12s | Coin: %8.2f | Транз: %3d | %s", name, info.balance, info.transactions, status)
-        table.insert(lines, line)
-    end
-    state.detailData = { lines = lines }
-    state.currentScreen = "players"
-end
-
-local function showStats()
-    local stats = getStats()
-    local lines = {
-        string.format("Покупок: %d", stats.totalBuys),
-        string.format("Продаж: %d", stats.totalSells),
-        string.format("Оборот: %.2f", stats.totalTurnover),
-    }
-    state.detailData = { lines = lines }
-    state.currentScreen = "stats"
-end
-
-local function showReports()
-    local reports = getReports()
-    local lines = {}
-    for i, r in ipairs(reports) do
-        local status = r.resolved and "[РЕШЕНА]" or "[ОТКРЫТА]"
-        table.insert(lines, string.format("%d. %s | %s | %s", i, r.name, r.text, status))
-    end
-    state.detailData = { lines = lines }
-    state.currentScreen = "reports"
-end
-
-local function showReviews()
-    local reviews = getReviews()
-    local lines = {}
-    for i, r in ipairs(reviews) do
-        table.insert(lines, string.format("%d. %s | %s", i, r.name, r.text))
-    end
-    state.detailData = { lines = lines }
-    state.currentScreen = "reviews"
-end
-
-local function showAdmins()
-    local admins = getAdmins()
-    local lines = {}
-    for i, name in ipairs(admins) do
-        table.insert(lines, string.format("%d. %s", i, name))
-    end
-    state.detailData = { lines = lines }
-    state.currentScreen = "admins"
-end
-
-local function showAddItem()
-    -- Простая форма для добавления предмета (заглушка)
-    local lines = {
-        "Введите название предмета и цену через пробел",
-        "Пример: \"Алмаз 100\"",
-        "Пока это демонстрация, данные не сохраняются."
-    }
-    state.detailData = { lines = lines }
-    state.currentScreen = "additem"
-end
-
-local function showJournal()
-    local journal = getJournal()
-    local lines = {}
-    for i, entry in ipairs(journal) do
-        table.insert(lines, entry)
-    end
-    state.detailData = { lines = lines }
-    state.currentScreen = "journal"
-end
-
-local function showPause()
-    local paused = getStoreStatus()
-    local status = paused and "ПРИОСТАНОВЛЕН" or "РАБОТАЕТ"
-    local lines = {
-        string.format("Текущий статус: %s", status),
-        "Нажмите любую клавишу для переключения (или кликните мышью)",
-    }
-    state.detailData = { lines = lines }
-    state.currentScreen = "pause"
-end
-
--- Функция перехода в главное меню
-local function goToMain()
-    state.currentScreen = "main"
-    state.detailData = nil
-    state.selectedIndex = nil
-    state.hoverIndex = nil
-    renderMain()
-end
-
--- ---- Отрисовка главного экрана ----
-function renderMain()
-    clearScreen()
-    drawHeader()
-    drawMenuGrid(state.hoverIndex)
-    -- Центральная область (пустая или с заглушкой)
-    local startY = CONFIG.grid.startY + CONFIG.grid.rows * (CONFIG.grid.height + CONFIG.grid.gapY) + 1
-    gpu.setBackground(CONFIG.colors.bg)
-    gpu.fill(2, startY, CONFIG.screenWidth - 3, CONFIG.screenHeight - startY - 3, " ")
-    setColor(0x666666, CONFIG.colors.bg)
-    gpu.set(4, startY + 2, "Выберите раздел из меню")
-    drawFooter()
-end
-
--- ---- Отрисовка экрана раздела ----
-function renderSection()
-    clearScreen()
-    drawHeader()
-    -- Сетка меню не рисуется, только центральная область с данными
-    -- Но мы можем оставить заголовок раздела и данные
-    local startY = CONFIG.grid.startY  -- используем ту же область
-    gpu.setBackground(CONFIG.colors.bg)
-    gpu.fill(2, startY, CONFIG.screenWidth - 3, CONFIG.screenHeight - startY - 3, " ")
-
-    if state.detailData and state.detailData.lines then
-        for i, line in ipairs(state.detailData.lines) do
-            if i > 20 then break end
-            setColor(CONFIG.colors.text, CONFIG.colors.bg)
-            gpu.set(4, startY + i, line)
+    -- Регистрация администратора или терминала
+    if op == "register" then
+        if msg.password ~= self.password then
+            self.modem.send(from, responsePort, serialization.serialize({op="error", message="Неверный пароль"}))
+            self:log("Попытка подключения с неверным паролем от " .. from)
+            return
         end
-    else
-        setColor(0x888888, CONFIG.colors.bg)
-        gpu.set(4, startY + 2, "Нет данных")
+        self.marketConnected = true
+        if not self.owner then
+            self.owner = from
+            self:log("АДМИН ЗАРЕГИСТРИРОВАН: " .. from)
+        end
+        if not self.markets[from] then
+            self.markets[from] = true
+            self:log("Терминал добавлен: " .. from)
+        end
+        self.modem.send(from, responsePort, serialization.serialize({
+            op="welcome", owner=(from==self.owner), shopPaused=self.shopPaused
+        }))
+        return
     end
 
-    drawFooter()
-end
+    -- Вход игрока
+    if op == "enter" then
+        if self.shopPaused then
+            self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
+            return
+        end
+        local playerName = msg.name
+        if not playerName or playerName == "" then
+            self:log("Вход без имени от " .. from)
+            return
+        end
+        local player = self:getOrCreatePlayer(playerName)
+        if player.banned then
+            self.modem.send(from, responsePort, serialization.serialize({op="error", message="Вы забанены"}))
+            return
+        end
 
--- ---- Основной цикл обработки событий ----
-local function mainLoop()
-    while true do
-        -- Обработка событий с таймаутом, чтобы обновлять время
-        local ev = { event.pull(0.5) }
-        local etype = ev[1]
-
-        -- Обновление времени в заголовке (каждые полсекунды)
-        if state.currentScreen == "main" then
-            renderMain()
+        local existingSession = self.sessions[playerName]
+        local token
+        if existingSession and os.time() - (existingSession.lastAction or 0) < self.SESSION_TIMEOUT then
+            token = existingSession.token
+            existingSession.lastAction = os.time()
+            self:log(playerName .. " продлил сессию")
         else
-            renderSection()
+            token = tostring(math.floor(math.random() * 900000000 + 100000000))
+            self.sessions[playerName] = {token = token, lastAction = os.time()}
+            self:log(playerName .. " вошёл")
         end
 
-        if etype == "mouse_move" then
-            local _, _, x, y = table.unpack(ev)
-            if state.currentScreen == "main" then
-                -- Проверяем, находится ли мышь над каким-либо блоком сетки
-                local hover = nil
-                for i = 1, #gridBlocks do
-                    if gridBlocks[i].id then
-                        local bx, by = getBlockPosition(i)
-                        if x >= bx and x <= bx + CONFIG.grid.width - 1 and
-                           y >= by and y <= by + CONFIG.grid.height - 1 then
-                            hover = i
-                            break
-                        end
+        self.modem.send(from, responsePort, serialization.serialize({
+            op="welcome", status="ok", token=token,
+            balance=player.balance or 0.0,
+            transactions=player.transactions,
+            regDate=player.regDate,
+            agreed = player.agreed or false,
+            shopPaused = self.shopPaused
+        }))
+        return
+    end
+
+    -- Получение данных аккаунта
+    if op == "getAccount" then
+        if not self:validateSession(msg.name, msg.token) then
+            self.modem.send(from, responsePort, serialization.serialize({op="accountData", error=true, message="Токен устарел"}))
+            return
+        end
+        local player = self.players[msg.name]
+        if not player then return end
+        self.sessions[msg.name].lastAction = os.time()
+        self.modem.send(from, responsePort, serialization.serialize({
+            op="accountData",
+            data = {
+                balance = player.balance,
+                transactions = player.transactions,
+                regDate = player.regDate,
+                agreed = player.agreed,
+                shopPaused = self.shopPaused
+            }
+        }))
+        return
+    end
+
+    -- Продажа (пополнение баланса)
+    if op == "sell" then
+        if self.shopPaused then
+            self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
+            return
+        end
+        if not self:validateSession(msg.name, msg.token) then
+            self:log("Неверный токен для sell")
+            return
+        end
+        local player = self.players[msg.name]
+        if not player or player.banned then return end
+        local qty = tonumber(msg.qty) or 0
+        local value = tonumber(msg.value) or 0
+
+        player.balance = (player.balance or 0) + value
+        player.transactions = (player.transactions or 0) + 1
+        self.sessions[msg.name].lastAction = os.time()
+
+        self.globalStats.totalSells = (self.globalStats.totalSells or 0) + 1
+        self:saveGlobalStats()
+        self:savePlayers()
+        self:log(string.format("💰 %s пополнил баланс: предмет '%s' x%d на сумму %.2f", msg.name, msg.item, qty, value))
+        return
+    end
+
+    -- Покупка (списание баланса)
+    if op == "buy" then
+        if self.shopPaused then
+            self.modem.send(from, responsePort, serialization.serialize({op="error", message="Магазин на паузе"}))
+            return
+        end
+        if not self:validateSession(msg.name, msg.token) then
+            self:log("Неверный токен для buy")
+            return
+        end
+        local player = self.players[msg.name]
+        if not player or player.banned then return end
+        local value = tonumber(msg.value) or 0
+
+        player.balance = (player.balance or 0) - value
+        player.transactions = (player.transactions or 0) + 1
+        self.sessions[msg.name].lastAction = os.time()
+
+        self.globalStats.totalBuys = (self.globalStats.totalBuys or 0) + 1
+        self:saveGlobalStats()
+        self:savePlayers()
+        self:log(string.format("🛒 %s купил %s x%d за %.2f", msg.name, msg.item, msg.qty, value))
+        return
+    end
+
+    -- Репорт (жалоба)
+    if op == "report" then
+        if not self:validateSession(msg.name, msg.token) then
+            self:log("Неверный токен для report")
+            return
+        end
+        self.globalStats.totalReports = (self.globalStats.totalReports or 0) + 1
+        self:saveGlobalStats()
+        self:log("📩 Репорт от " .. msg.name .. " (" .. msg.time .. ")")
+        self:log("   Текст: " .. (msg.text or ""))
+        local file = io.open(CONFIG.reportsLog, "a")
+        if file then
+            file:write("[" .. msg.time .. "] " .. msg.name .. ": " .. msg.text .. "\n")
+            file:close()
+        end
+        return
+    end
+
+    -- Согласие с правилами
+    if op == "agree" then
+        if not self:validateSession(msg.name, msg.token) then
+            self.modem.send(from, responsePort, serialization.serialize({op="agree", error=true, message="Токен устарел"}))
+            return
+        end
+        local player = self.players[msg.name]
+        if player then
+            player.agreed = true
+            self:savePlayers()
+            self.sessions[msg.name].lastAction = os.time()
+            self:log("📝 " .. msg.name .. " принял пользовательское соглашение")
+            self.modem.send(from, responsePort, serialization.serialize({op="agree", success=true, agreed=true}))
+        else
+            self.modem.send(from, responsePort, serialization.serialize({op="agree", error=true, message="Игрок не найден"}))
+        end
+        return
+    end
+
+    -- Получение отзывов
+    if op == "get_feedbacks" then
+        if not self:validateSession(msg.name, msg.token) then
+            self.modem.send(from, responsePort, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
+            return
+        end
+        local player = self.players[msg.name]
+        self.modem.send(from, responsePort, serialization.serialize({
+            op = "feedbacks_list",
+            feedbacks = self.feedbacks,
+            hasFeedback = player and player.hasFeedback or false
+        }))
+        return
+    end
+
+    -- Добавление отзыва
+    if op == "add_feedback" then
+        if not self:validateSession(msg.name, msg.token) then
+            self.modem.send(from, responsePort, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
+            return
+        end
+        local player = self.players[msg.name]
+        if not player then
+            self.modem.send(from, responsePort, serialization.serialize({op="add_feedback_response", success=false, error="Игрок не найден"}))
+            return
+        end
+        if player.hasFeedback then
+            self.modem.send(from, responsePort, serialization.serialize({op="add_feedback_response", success=false, error="Вы уже оставляли отзыв"}))
+            return
+        end
+        table.insert(self.feedbacks, 1, {name = msg.name, text = msg.text, time = msg.time})
+        self:saveFeedbacks()
+        player.hasFeedback = true
+        self:savePlayers()
+        self.modem.send(from, responsePort, serialization.serialize({op="add_feedback_response", success=true}))
+        self:log("📝 Новый отзыв от " .. msg.name .. ": " .. msg.text)
+        return
+    end
+end
+
+-- =====================================================================
+--  GUI-ПРИЛОЖЕНИЕ (АДМИН-ПАНЕЛЬ)
+-- =====================================================================
+
+local server = Server.new()
+
+-- Создаём приложение на весь экран
+local app = GUI.application()
+app:addChild(GUI.panel(1, 1, app.width, app.height, 0x000000))
+
+-- Верхняя панель (заголовок, статус, время)
+local topPanel = app:addChild(GUI.panel(1, 1, app.width, 1, 0x000000))
+local titleLabel = topPanel:addChild(GUI.label(1, 1, 20, 1, 0xFFFFFF, "PIM MARKET SERVER"))
+local statusLabel = topPanel:addChild(GUI.label(app.width - 30, 1, 30, 1, 0xFFFFFF, ""))
+
+local function updateStatus()
+    local status = server.shopPaused and "MARKET OFFLINE" or "MARKET ONLINE"
+    local color = server.shopPaused and 0xE74C3C or 0x2ECC71
+    statusLabel.text = status .. " " .. os.date("%Y-%m-%d %H:%M:%S")
+    statusLabel.color = color
+end
+
+-- Контейнер для меню (сетка 3x3)
+local menuContainer = app:addChild(GUI.container(1, 3, app.width, 14))
+
+-- Данные для блоков меню
+local menuData = {
+    { id = "players",    label = "ИГРОКИ",           sublabel = "Балансы, блокировки, транзакции", color = CONFIG.colors.players },
+    { id = "stats",      label = "СТАТИСТИКА",       sublabel = "Покупки, продажи, оборот",        color = CONFIG.colors.stats },
+    { id = "reports",    label = "РЕПОРТЫ",          sublabel = "Чтение и удаление жалоб",         color = CONFIG.colors.reports },
+    { id = "reviews",    label = "ОТЗЫВЫ",           sublabel = "Чтение и удаление отзывов",       color = CONFIG.colors.reviews },
+    { id = "admins",     label = "АДМИНИСТРАТОРЫ",   sublabel = "Добавить или удалить админа",    color = CONFIG.colors.admins },
+    { id = "addItem",    label = "ДОБАВИТЬ ПРЕДМЕТ", sublabel = "Отправить предмет в каталог",    color = CONFIG.colors.addItem },
+    { id = "journal",    label = "ЖУРНАЛ",           sublabel = "Только важные события",           color = CONFIG.colors.journal },
+    { id = "storeStatus",label = "ПРИОСТАНОВИТЬ МАГАЗИН", sublabel = "Управление доступностью терминалов", color = CONFIG.colors.storeStatus },
+}
+
+-- Параметры сетки
+local cols, rows = 3, 3
+local blockW, blockH = 24, 4
+local gapX, gapY = 4, 2
+local totalWidth = blockW * cols + gapX * (cols - 1)
+local startX = math.floor((app.width - totalWidth) / 2)
+local startY = 1
+
+-- Функция создания блока меню (используем GUI.button с кастомизацией)
+local function createMenuBlock(x, y, w, h, color, label, sublabel, sectionId)
+    local panel = menuContainer:addChild(GUI.panel(x, y, w, h, 0x000000))
+    panel.borderColor = color
+    panel.borderSize = 1
+    panel.draw = function(self)
+        GUI.panel.draw(self)
+        local fg = 0xFFFFFF
+        local bg = 0x000000
+        local labelX = x + math.floor((w - #label) / 2)
+        local subX   = x + math.floor((w - #sublabel) / 2)
+        buffer.text(labelX, y + 1, fg, bg, label)
+        buffer.text(subX, y + 2, fg, bg, sublabel)
+    end
+    panel.onTouch = function()
+        showSection(sectionId)
+    end
+    panel.onMouseEnter = function()
+        panel.borderColor = math.min(color + 0x444444, 0xFFFFFF)
+        app:draw()
+        buffer.draw()
+    end
+    panel.onMouseLeave = function()
+        panel.borderColor = color
+        app:draw()
+        buffer.draw()
+    end
+    return panel
+end
+
+-- Создаём блоки
+for i, data in ipairs(menuData) do
+    local row = math.floor((i - 1) / cols)
+    local col = (i - 1) % cols
+    local x = startX + col * (blockW + gapX)
+    local y = startY + row * (blockH + gapY)
+    createMenuBlock(x, y, blockW, blockH, data.color, data.label, data.sublabel, data.id)
+end
+
+-- Контейнер для содержимого разделов (центральная область)
+local contentContainer = app:addChild(GUI.container(1, 18, app.width, app.height - 20))
+
+-- Функция отображения раздела
+local function showSection(sectionId)
+    contentContainer:deleteChildren()
+    local panel = contentContainer:addChild(GUI.panel(1, 1, contentContainer.width, contentContainer.height, 0x000000))
+    panel.draw = function(self)
+        GUI.panel.draw(self)
+        local y = 2
+        local fg = 0xFFFFFF
+        local bg = 0x000000
+
+        -- Раздел "Игроки"
+        if sectionId == "players" then
+            buffer.text(2, y, fg, bg, "=== ИГРОКИ ===")
+            y = y + 1
+            for name, data in pairs(server.players) do
+                local line = name .. " | Баланс: " .. data.balance .. " | Заблокирован: " .. tostring(data.banned)
+                buffer.text(2, y, fg, bg, line)
+                y = y + 1
+                -- Кнопки управления (добавляем прямо в панель как дочерние объекты)
+                local btnBlock = panel:addChild(GUI.button(50, y, 12, 1, 0xE74C3C, 0xFFFFFF, 0xC0392B, 0xFFFFFF, data.banned and "Разблок." or "Заблок."))
+                btnBlock.onTouch = function()
+                    data.banned = not data.banned
+                    server:savePlayers()
+                    showSection(sectionId)
+                end
+                -- Кнопка пополнения баланса
+                local btnAdd = panel:addChild(GUI.button(65, y, 12, 1, 0x2ECC71, 0xFFFFFF, 0x27AE60, 0xFFFFFF, "+ Баланс"))
+                btnAdd.onTouch = function()
+                    local input = GUI.inputBox(app, "Пополнение баланса", "Введите сумму:", "", true)
+                    if input and tonumber(input) then
+                        data.balance = (data.balance or 0) + tonumber(input)
+                        server:savePlayers()
+                        showSection(sectionId)
                     end
                 end
-                if hover ~= state.hoverIndex then
-                    state.hoverIndex = hover
-                    renderMain()
+                y = y + 1
+                -- Транзакции (последние 3)
+                local tcount = data.transactions or 0
+                if tcount > 0 then
+                    buffer.text(4, y, fg, bg, "Транзакций: " .. tcount)
+                    y = y + 1
+                end
+                y = y + 1
+            end
+        -- Статистика
+        elseif sectionId == "stats" then
+            buffer.text(2, y, fg, bg, "=== СТАТИСТИКА ===")
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Покупок: " .. server.globalStats.totalBuys)
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Продаж:   " .. server.globalStats.totalSells)
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Оборот:   " .. (server.globalStats.totalBuys + server.globalStats.totalSells))
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Репортов: " .. server.globalStats.totalReports)
+        -- Репорты
+        elseif sectionId == "reports" then
+            buffer.text(2, y, fg, bg, "=== РЕПОРТЫ (ЖАЛОБЫ) ===")
+            y = y + 1
+            -- Читаем из файла reports.log
+            local reports = {}
+            if filesystem.exists(CONFIG.reportsLog) then
+                local file = io.open(CONFIG.reportsLog, "r")
+                local content = file:read("*a")
+                file:close()
+                for line in content:gmatch("[^\n]+") do
+                    table.insert(reports, line)
                 end
             end
-
-        elseif etype == "touch" then
-            local _, _, x, y = table.unpack(ev)
-            if state.currentScreen == "main" then
-                -- Клик по сетке
-                for i = 1, #gridBlocks do
-                    if gridBlocks[i].id then
-                        local bx, by = getBlockPosition(i)
-                        if x >= bx and x <= bx + CONFIG.grid.width - 1 and
-                           y >= by and y <= by + CONFIG.grid.height - 1 then
-                            -- Выбран раздел
-                            state.selectedIndex = i
-                            local id = gridBlocks[i].id
-                            if id == "players" then showPlayers()
-                            elseif id == "stats" then showStats()
-                            elseif id == "reports" then showReports()
-                            elseif id == "reviews" then showReviews()
-                            elseif id == "admins" then showAdmins()
-                            elseif id == "additem" then showAddItem()
-                            elseif id == "journal" then showJournal()
-                            elseif id == "pause" then showPause()
-                            end
-                            renderSection()
-                            break
-                        end
-                    end
-                end
-                -- Клик по кнопке "< НАЗАД" в футере (если мы в главном меню, то ничего не делаем)
-                if y == CONFIG.screenHeight and x >= 2 and x <= 2 + #CONFIG.footer.backLabel then
-                    -- Игнорируем, так как мы уже в главном меню
-                end
+            if #reports == 0 then
+                buffer.text(2, y, fg, bg, "Нет жалоб.")
             else
-                -- В режиме раздела: клик на "< НАЗАД" возвращает в главное меню
-                if y == CONFIG.screenHeight and x >= 2 and x <= 2 + #CONFIG.footer.backLabel then
-                    goToMain()
-                end
-                -- Для раздела PAUSE: клик переключает статус
-                if state.currentScreen == "pause" then
-                    local newStatus = toggleStoreStatus()
-                    logEvent("Статус магазина изменён: " .. (newStatus and "ПРИОСТАНОВЛЕН" or "РАБОТАЕТ"))
-                    showPause()
-                    renderSection()
-                end
-            end
-
-        elseif etype == "key_down" then
-            local _, _, char, code = table.unpack(ev)
-            if code == 1 then -- Esc
-                if state.currentScreen ~= "main" then
-                    goToMain()
-                else
-                    -- В главном меню Esc ничего не делает (можно выйти, но не требуется)
+                for i, line in ipairs(reports) do
+                    buffer.text(2, y, fg, bg, line)
+                    -- Кнопка "Разрешить" (просто удаляем строку)
+                    local btn = panel:addChild(GUI.button(60, y, 12, 1, 0x2ECC71, 0xFFFFFF, 0x27AE60, 0xFFFFFF, "Разрешить"))
+                    btn.onTouch = function()
+                        -- Удаляем эту строку из файла
+                        local newContent = ""
+                        for j, l in ipairs(reports) do
+                            if j ~= i then newContent = newContent .. l .. "\n" end
+                        end
+                        local file = io.open(CONFIG.reportsLog, "w")
+                        file:write(newContent)
+                        file:close()
+                        showSection(sectionId)
+                    end
+                    y = y + 1
+                    if y > contentContainer.height - 2 then break end
                 end
             end
-            -- Дополнительно: для раздела PAUSE любая клавиша переключает
-            if state.currentScreen == "pause" and code ~= 1 then
-                local newStatus = toggleStoreStatus()
-                logEvent("Статус магазина изменён: " .. (newStatus and "ПРИОСТАНОВЛЕН" or "РАБОТАЕТ"))
-                showPause()
-                renderSection()
+        -- Отзывы
+        elseif sectionId == "reviews" then
+            buffer.text(2, y, fg, bg, "=== ОТЗЫВЫ ===")
+            y = y + 1
+            if #server.feedbacks == 0 then
+                buffer.text(2, y, fg, bg, "Нет отзывов.")
+            else
+                for i, rev in ipairs(server.feedbacks) do
+                    local line = rev.name .. ": " .. rev.text .. " (" .. rev.time .. ")"
+                    buffer.text(2, y, fg, bg, line)
+                    local btn = panel:addChild(GUI.button(60, y, 12, 1, 0xE74C3C, 0xFFFFFF, 0xC0392B, 0xFFFFFF, "Удалить"))
+                    btn.onTouch = function()
+                        table.remove(server.feedbacks, i)
+                        server:saveFeedbacks()
+                        showSection(sectionId)
+                    end
+                    y = y + 1
+                    if y > contentContainer.height - 2 then break end
+                end
+            end
+        -- Администраторы
+        elseif sectionId == "admins" then
+            buffer.text(2, y, fg, bg, "=== АДМИНИСТРАТОРЫ ===")
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Главный админ: " .. server.adminName)
+            y = y + 1
+            -- Можно добавить других админов (в данной версии только один)
+            local btnAdd = panel:addChild(GUI.button(2, y, 18, 1, 0x3498DB, 0xFFFFFF, 0x2980B9, 0xFFFFFF, "Сменить пароль"))
+            btnAdd.onTouch = function()
+                local input = GUI.inputBox(app, "Смена пароля", "Введите новый пароль:", "", true)
+                if input and input ~= "" then
+                    server.password = input
+                    showSection(sectionId)
+                end
+            end
+        -- Добавить предмет
+        elseif sectionId == "addItem" then
+            buffer.text(2, y, fg, bg, "=== ДОБАВИТЬ ПРЕДМЕТ ===")
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Введите название предмета для каталога:")
+            y = y + 1
+            local btn = panel:addChild(GUI.button(2, y, 20, 1, 0x3498DB, 0xFFFFFF, 0x2980B9, 0xFFFFFF, "Отправить"))
+            btn.onTouch = function()
+                local input = GUI.inputBox(app, "Добавление предмета", "Название:", "", true)
+                if input and input ~= "" then
+                    server:log("Предмет добавлен в каталог: " .. input)
+                    showSection(sectionId)
+                end
+            end
+        -- Журнал
+        elseif sectionId == "journal" then
+            buffer.text(2, y, fg, bg, "=== ЖУРНАЛ СОБЫТИЙ ===")
+            y = y + 1
+            -- Для демонстрации показываем последние события из лога (можно хранить в памяти)
+            buffer.text(2, y, fg, bg, "Последние события сервера:")
+            y = y + 1
+            -- Здесь можно читать файл журнала, если ведётся
+            buffer.text(2, y, fg, bg, " (функция в разработке)")
+        -- Приостановить магазин
+        elseif sectionId == "storeStatus" then
+            local status = server.shopPaused and "ЗАКРЫТ" or "ОТКРЫТ"
+            buffer.text(2, y, fg, bg, "=== ПРИОСТАНОВИТЬ МАГАЗИН ===")
+            y = y + 1
+            buffer.text(2, y, fg, bg, "Текущий статус: " .. status)
+            y = y + 1
+            local btn = panel:addChild(GUI.button(2, y, 20, 1, 0xF1C40F, 0x000000, 0xF39C12, 0x000000, "Переключить"))
+            btn.onTouch = function()
+                server.shopPaused = not server.shopPaused
+                updateStatus()
+                showSection(sectionId)
             end
         end
+    end
+    app:draw()
+    buffer.draw()
+end
 
-        -- Имитация активности (генерация тестовых данных) каждые 30 секунд
-        if math.random(1, 6) == 1 then
-            simulateMarketActivity()
+-- Нижняя панель (кнопка "НАЗАД" и подсказка)
+local bottomPanel = app:addChild(GUI.panel(1, app.height, app.width, 1, 0x000000))
+local backButton = bottomPanel:addChild(GUI.button(1, 1, 12, 1, 0xFFFFFF, 0x000000, 0xAAAAAA, 0x000000, "< НАЗАД"))
+backButton.onTouch = function()
+    contentContainer:deleteChildren()
+    app:draw()
+    buffer.draw()
+end
+local hintLabel = bottomPanel:addChild(GUI.label(app.width - 30, 1, 30, 1, 0x888888, "Esc — назад | выберите раздел мышкой"))
+
+-- Таймер обновления времени
+local timeTimer = event.timer(1, function()
+    updateStatus()
+    app:draw()
+    buffer.draw()
+end, math.huge)
+
+-- Обработчик событий приложения (перехватываем модемные сообщения)
+app.eventHandler = function(application, object, eventType, ...)
+    if eventType == "modem_message" then
+        local _, _, from, port, _, _, raw = ...
+        if port == 0xffef or port == 0xfffe then
+            server:handleMessage(from, port, raw)
         end
     end
 end
 
--- =============================================================================
--- ЗАПУСК
--- =============================================================================
+-- =====================================================================
+--  ЗАПУСК ПРИЛОЖЕНИЯ
+-- =====================================================================
 
--- Обработка ошибок при запуске
-local ok, err = pcall(function()
-    -- Проверка наличия необходимых компонентов
-    if not gpu then
-        error("Видеокарта не найдена")
-    end
-    -- Устанавливаем разрешение
-    gpu.setResolution(CONFIG.screenWidth, CONFIG.screenHeight)
-
-    -- Инициализация: генерируем немного тестовых данных при старте
-    for _ = 1, 5 do
-        simulateMarketActivity()
+local function main()
+    -- Установка разрешения
+    if gpu then
+        gpu.setResolution(CONFIG.windowWidth, CONFIG.windowHeight)
     end
 
-    -- Переходим в главное меню
-    state.currentScreen = "main"
-    renderMain()
+    -- Первоначальная отрисовка
+    updateStatus()
+    app:draw()
+    buffer.draw()
 
-    -- Запускаем основной цикл
-    mainLoop()
-end)
+    -- Запуск обработки событий (блокирующий)
+    app:start()
+end
 
+-- Запуск с обработкой ошибок
+local ok, err = pcall(main)
 if not ok then
-    -- Если ошибка, выводим её и ждём нажатия
     term.clear()
-    term.write("Ошибка: " .. tostring(err) .. "\nНажмите любую клавишу для выхода.")
-    event.pull("key_down")
+    term.setCursorPos(1,1)
+    term.setForegroundColor(0xE74C3C)
+    print("КРИТИЧЕСКАЯ ОШИБКА:")
+    print(tostring(err))
+    print(debug.traceback())
+    term.setForegroundColor(0xFFFFFF)
+    print("Нажмите любую клавишу для выхода...")
+    computer.pullEvent("key_down")
 end
+
+-- Отмена таймера при выходе
+event.cancel(timeTimer)
