@@ -1,5 +1,5 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.1
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.2
 -- Исправлен порядок определения функций
 -- ============================================================
 
@@ -61,7 +61,16 @@ local function trunc(v, w)
 end
 
 -- ------------------------------------------------------------------
--- 3. ФУНКЦИИ СОХРАНЕНИЯ (определены ДО загрузки данных)
+-- 3. ГЛОБАЛЬНЫЕ ТАБЛИЦЫ (объявлены до функций сохранения)
+-- ------------------------------------------------------------------
+local players = {}
+local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
+local feedbacks = {}
+local buyCatalog = {}
+local sellCatalog = {}
+
+-- ------------------------------------------------------------------
+-- 4. ФУНКЦИИ СОХРАНЕНИЯ (определены ДО загрузки данных)
 -- ------------------------------------------------------------------
 local function savePlayers()
     local file = io.open(DB_PATH, "w")
@@ -85,9 +94,8 @@ local function saveCatalog()
 end
 
 -- ------------------------------------------------------------------
--- 4. ЗАГРУЗКА ДАННЫХ (выполняется после определения функций сохранения)
+-- 5. ЗАГРУЗКА ДАННЫХ (выполняется после определения функций сохранения)
 -- ------------------------------------------------------------------
-local players = {}
 if filesystem.exists(DB_PATH) then
     local file = io.open(DB_PATH, "r")
     local raw = file:read("*a")
@@ -98,7 +106,6 @@ if filesystem.exists(DB_PATH) then
     end
 end
 
-local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
 if filesystem.exists(STATS_PATH) then
     local file = io.open(STATS_PATH, "r")
     local raw = file:read("*a")
@@ -113,7 +120,6 @@ if filesystem.exists(STATS_PATH) then
     end
 end
 
-local feedbacks = {}
 if filesystem.exists(FEEDBACKS_PATH) then
     local file = io.open(FEEDBACKS_PATH, "r")
     local raw = file:read("*a")
@@ -124,8 +130,6 @@ if filesystem.exists(FEEDBACKS_PATH) then
     end
 end
 
-local buyCatalog = {}
-local sellCatalog = {}
 if filesystem.exists(CATALOG_PATH) then
     local file = io.open(CATALOG_PATH, "r")
     local raw = file:read("*a")
@@ -140,7 +144,7 @@ if filesystem.exists(CATALOG_PATH) then
 end
 
 -- ------------------------------------------------------------------
--- 5. ЗАГРУЗКА ИЗ ФАЙЛА shop_items.lua (теперь saveCatalog определена)
+-- 6. ЗАГРУЗКА ИЗ ФАЙЛА shop_items.lua
 -- ------------------------------------------------------------------
 local function loadSellItemsFromFile()
     if not filesystem.exists(SHOP_ITEMS_FILE) then
@@ -192,7 +196,7 @@ if #buyCatalog == 0 then
 end
 
 -- ------------------------------------------------------------------
--- 6. СЕССИИ И ПОЛЬЗОВАТЕЛИ
+-- 7. СЕССИИ И ПОЛЬЗОВАТЕЛИ
 -- ------------------------------------------------------------------
 local sessions = {}
 local owner = nil
@@ -226,7 +230,7 @@ local function logEvent(msg)
 end
 
 -- ------------------------------------------------------------------
--- 7. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
+-- 8. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ
 -- ------------------------------------------------------------------
 modem.open(0xffef)
 modem.open(0xfffe)
@@ -402,7 +406,6 @@ local function handleOldRequest(from, port, msg)
         logEvent("📝 Новый отзыв от " .. msg.name .. ": " .. msg.text)
         return
 
-    -- НОВОЕ: синхронизация каталога скупки (принимает список товаров)
     elseif op == "sync_sell_catalog" then
         if not isAdmin(from) then
             modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
@@ -521,7 +524,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 8. АДМИН-ПАНЕЛЬ
+-- 9. АДМИН-ПАНЕЛЬ
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -530,7 +533,6 @@ if maxW and maxH and (WIDTH < maxW or HEIGHT < maxH) then
     WIDTH, HEIGHT = gpu.getResolution()
 end
 
--- Цветовая палитра
 local C = {
     bg = 0x0C0C0C, panel = 0x11191D, header = 0x0A0A0A, line = 0x27BDEC,
     accent = 0x0C9A76, white = 0xFFFFFF, gray = 0xAAAAAA, dark = 0x555555,
@@ -568,7 +570,6 @@ local function box(x, y, w, h, fg, bg)
     write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
 end
 
--- Структура UI
 local ui = {
     tab = "buy",
     selected = 1,
@@ -747,7 +748,6 @@ local function loadForm()
     end
 end
 
--- Отрисовка правой панели
 local function catalogEditor()
     local x = RIGHT_X; local w = RIGHT_W
     local title = (ui.tab == "buy" and "РЕДАКТОР ПОКУПКИ" or "РЕДАКТОР ПРОДАЖИ")
@@ -839,7 +839,6 @@ local function drawRight(e)
     end
 end
 
--- Отрисовка заголовка, списка, нижней панели
 local function drawHeader()
     fill(1, 1, WIDTH, TOP, C.header)
     center(1, "──── PIM MARKET SERVER ────", C.accent, C.header)
@@ -908,7 +907,7 @@ end
 local function reload() loadForm(); ui.activeField = nil; drawAll() end
 
 -- ------------------------------------------------------------------
--- 9. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
+-- 10. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
 -- ------------------------------------------------------------------
 local function action(id)
     if id == "back" then
@@ -1108,7 +1107,7 @@ local function action(id)
 end
 
 -- ------------------------------------------------------------------
--- 10. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
+-- 11. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
 -- ------------------------------------------------------------------
 local function inside(x, y, c) return y == c.y and x >= c.x and x < c.x + c.w end
 local function touch(x, y)
@@ -1170,7 +1169,6 @@ local function key(char, code)
             local ch = unicode.char(char)
             if not f.numeric or ch:match("[%d%.,%-]") then f.value = f.value .. ch end
         end
-        -- обновляем форму
         if f.id == "displayName" or f.id == "internalName" or f.id == "damage" or f.id == "priceCoin" or f.id == "priceEma" or f.id == "article" or f.id == "maxQty" then
             ui.form[f.id] = f.value
         elseif f.id == "name" or f.id == "balance" or f.id == "transactions" or f.id == "banReason" or f.id == "banDuration" or f.id == "bannedBy" or f.id == "new_admin" then
@@ -1191,7 +1189,7 @@ local function key(char, code)
 end
 
 -- ------------------------------------------------------------------
--- 11. ЗАПУСК
+-- 12. ЗАПУСК
 -- ------------------------------------------------------------------
 loadForm()
 drawAll()
@@ -1222,7 +1220,6 @@ while true do
         print("Порты: 0xffef, 0xfffe")
         break
     end
-    -- автоматическое обновление
     if computer.uptime() - ui.lastDraw > 2 then
         drawAll()
     end
