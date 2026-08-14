@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – совместим со старым протоколом
--- Версия 3.0 – админ-панель + поддержка портов 0xffef/0xfffe
+-- PIM MARKET SERVER (UNIFIED) – с каталогом покупок/продаж
+-- Версия 4.0 – админ-панель с редактором товаров
 -- ============================================================
 
 local component = require("component")
@@ -32,9 +32,10 @@ local DB_PATH = "/home/players.db"
 local STATS_PATH = "/home/global_stats.db"
 local FEEDBACKS_PATH = "/home/feedbacks.db"
 local REPORTS_LOG = "/home/reports.log"
+local CATALOG_PATH = "/home/catalog.db"   -- новый файл для каталога
 
 -- ------------------------------------------------------------------
--- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время)
+-- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (время, работа с файлами)
 -- ------------------------------------------------------------------
 local tmpfs = component.proxy(computer.tmpAddress())
 local function getRealTimestamp()
@@ -46,9 +47,20 @@ end
 local function getRealTimeString() return os.date("%H:%M:%S", getRealTimestamp()) end
 local function getRealDateTimeString() return os.date("%d.%m.%Y %H:%M:%S", getRealTimestamp()) end
 local function stamp() return getRealDateTimeString() end
+local function num(v, d) local n = tonumber(v); return n ~= nil and n or (d or 0) end
+local function trim(v) local s = string.format("%.4f", num(v, 0)):gsub("0+$", ""):gsub("%.$", ""); return s == "" and "0" or s end
+local function clone(v) if type(v) ~= "table" then return v end; local r = {}; for k, n in pairs(v) do r[k] = clone(n) end; return r end
+local function tableSize(t) local c = 0; for _ in pairs(t) do c = c + 1 end; return c end
+local function ulen(v) return unicode.len(tostring(v or "")) end
+local function usub(v, a, b) return unicode.sub(tostring(v or ""), a, b) end
+local function trunc(v, w)
+    v = tostring(v or ""); w = math.max(1, tonumber(w) or 1)
+    if ulen(v) <= w then return v end
+    return w <= 1 and usub(v, 1, w) or usub(v, 1, w - 1) .. "…"
+end
 
 -- ------------------------------------------------------------------
--- 3. ЗАГРУЗКА/СОХРАНЕНИЕ ДАННЫХ (старый формат)
+-- 3. ЗАГРУЗКА/СОХРАНЕНИЕ ДАННЫХ (старый формат + каталог)
 -- ------------------------------------------------------------------
 local players = {}
 if filesystem.exists(DB_PATH) then
@@ -87,6 +99,33 @@ if filesystem.exists(FEEDBACKS_PATH) then
     end
 end
 
+-- Каталог (новое)
+local buyCatalog = {}
+local sellCatalog = {}
+if filesystem.exists(CATALOG_PATH) then
+    local file = io.open(CATALOG_PATH, "r")
+    local raw = file:read("*a")
+    file:close()
+    if raw and #raw > 0 then
+        local ok, data = pcall(serialization.unserialize, raw)
+        if ok and type(data) == "table" then
+            buyCatalog = data.buyCatalog or {}
+            sellCatalog = data.sellCatalog or {}
+        end
+    end
+end
+-- если пусто, добавим примеры
+if #buyCatalog == 0 then
+    buyCatalog = {
+        { displayName = "Алмаз", internalName = "minecraft:diamond", damage = 0, priceCoin = 10, priceEma = 0, article = "#VIP-001", enabled = true }
+    }
+end
+if #sellCatalog == 0 then
+    sellCatalog = {
+        { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true }
+    }
+end
+
 local function savePlayers()
     local file = io.open(DB_PATH, "w")
     file:write(serialization.serialize(players))
@@ -102,9 +141,14 @@ local function saveFeedbacks()
     file:write(serialization.serialize(feedbacks))
     file:close()
 end
+local function saveCatalog()
+    local file = io.open(CATALOG_PATH, "w")
+    file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
+    file:close()
+end
 
 -- ------------------------------------------------------------------
--- 4. СЕССИИ И ПОЛЬЗОВАТЕЛИ
+-- 4. СЕССИИ И ПОЛЬЗОВАТЕЛИ (как в старом сервере)
 -- ------------------------------------------------------------------
 local sessions = {}
 local owner = nil
@@ -135,7 +179,6 @@ end
 local function logEvent(msg)
     local line = "[" .. getRealDateTimeString() .. "] " .. msg
     print(line)
-    -- можно также дописывать в отдельный журнал, но для совместимости оставим только вывод
 end
 
 -- ------------------------------------------------------------------
@@ -314,7 +357,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 6. АДМИН-ПАНЕЛЬ (адаптирована под старые данные)
+-- 6. АДМИН-ПАНЕЛЬ (с вкладками ПОКУПКИ/ПРОДАЖИ)
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -323,7 +366,7 @@ if maxW and maxH and (WIDTH < maxW or HEIGHT < maxH) then
     WIDTH, HEIGHT = gpu.getResolution()
 end
 
--- Цветовая палитра (как в VIP-SHOP)
+-- Цветовая палитра
 local C = {
     bg = 0x0C0C0C, panel = 0x11191D, header = 0x0A0A0A, line = 0x27BDEC,
     accent = 0x0C9A76, white = 0xFFFFFF, gray = 0xAAAAAA, dark = 0x555555,
@@ -332,13 +375,7 @@ local C = {
     danger = 0x8B1A1A, pause = 0x8A5A00, orange = 0xFF8800, magenta = 0xFF44FF,
 }
 
-local function ulen(v) return unicode.len(tostring(v or "")) end
-local function usub(v, a, b) return unicode.sub(tostring(v or ""), a, b) end
-local function trunc(v, w)
-    v = tostring(v or ""); w = math.max(1, tonumber(w) or 1)
-    if ulen(v) <= w then return v end
-    return w <= 1 and usub(v, 1, w) or usub(v, 1, w - 1) .. "…"
-end
+-- Вспомогательные функции для GUI
 local function fill(x, y, w, h, bg, ch)
     if w <= 0 or h <= 0 then return end
     gpu.setBackground(bg or C.bg); gpu.fill(x, y, w, h, ch or " ")
@@ -367,14 +404,10 @@ local function box(x, y, w, h, fg, bg)
     end
     write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
 end
-local function num(v, d) local n = tonumber(v); return n ~= nil and n or (d or 0) end
-local function trim(v) local s = string.format("%.4f", num(v, 0)):gsub("0+$", ""):gsub("%.$", ""); return s == "" and "0" or s end
-local function clone(v) if type(v) ~= "table" then return v end; local r = {}; for k, n in pairs(v) do r[k] = clone(n) end; return r end
-local function tableSize(t) local c = 0; for _ in pairs(t) do c = c + 1 end; return c end
 
 -- Структура UI
 local ui = {
-    tab = "users",
+    tab = "buy",   -- первая вкладка
     selected = 1,
     scroll = 0,
     search = "",
@@ -389,13 +422,15 @@ local ui = {
     lastDraw = 0
 }
 
+-- Вкладки (теперь ПОКУПКИ и ПРОДАЖИ идут первыми)
 local tabs = {
+    { id = "buy", title = "ПОКУПКИ" },
+    { id = "sell", title = "ПРОДАЖИ" },
     { id = "users", title = "ИГРОКИ" },
     { id = "stats", title = "СТАТИСТИКА" },
     { id = "reports", title = "РЕПОРТЫ" },
     { id = "feedbacks", title = "ОТЗЫВЫ" },
     { id = "admins", title = "АДМИНИСТРАТОРЫ" },
-    { id = "addItem", title = "ДОБАВИТЬ ПРЕДМЕТ" },
     { id = "journal", title = "ЖУРНАЛ" },
     { id = "storeStatus", title = "ПРИОСТАНОВИТЬ МАГАЗИН" },
 }
@@ -435,10 +470,29 @@ local function drawField(f, focus)
     write(ix + 1, f.y, trunc(f.value, iw - 2), f.readonly and C.dark or (focus and C.cyan or C.white), C.input)
 end
 
+-- Функции работы с каталогом
+local function getCatalog(tab)
+    if tab == "buy" then return buyCatalog else return sellCatalog end
+end
+local function setCatalog(tab, catalog)
+    if tab == "buy" then buyCatalog = catalog else sellCatalog = catalog end
+    saveCatalog()
+end
+
+-- Список данных для левой панели
 local function listData()
     local r = {}
     local q = tostring(ui.search or ""):lower()
-    if ui.tab == "users" then
+    if ui.tab == "buy" or ui.tab == "sell" then
+        local src = getCatalog(ui.tab)
+        for i, item in ipairs(src) do
+            local name = tostring(item.displayName or item.internalName or "")
+            if q == "" or name:lower():find(q, 1, true) then
+                r[#r + 1] = { sourceIndex = i, title = name, sub = tostring(item.internalName or "") .. " | " .. trim(item.priceCoin or 0) .. " COINA", raw = item }
+            end
+        end
+        table.sort(r, function(a, b) return a.title:lower() < b.title:lower() end)
+    elseif ui.tab == "users" then
         for name, u in pairs(players) do
             if q == "" or tostring(name):lower():find(q, 1, true) then
                 r[#r + 1] = { key = name, title = name, sub = "Баланс: " .. trim(u.balance) .. " | Транзакций: " .. (u.transactions or 0), raw = u }
@@ -446,10 +500,8 @@ local function listData()
         end
         table.sort(r, function(a, b) return a.title:lower() < b.title:lower() end)
     elseif ui.tab == "stats" then
-        -- статистика не требует списка
         r = { { title = "Статистика", sub = "", raw = globalStats } }
     elseif ui.tab == "reports" then
-        -- читаем reports.log
         local reports = {}
         if filesystem.exists(REPORTS_LOG) then
             local file = io.open(REPORTS_LOG, "r")
@@ -474,12 +526,8 @@ local function listData()
             end
         end
     elseif ui.tab == "admins" then
-        -- список администраторов (пока только ADMIN_NAME)
         r = { { key = 1, title = ADMIN_NAME, sub = "Главный администратор", raw = {} } }
-    elseif ui.tab == "addItem" then
-        r = { { title = "Добавить предмет", sub = "Введите название", raw = {} } }
     elseif ui.tab == "journal" then
-        -- журнал можно брать из лога, но для простоты оставим заглушку
         r = { { title = "Журнал событий", sub = "В разработке", raw = {} } }
     elseif ui.tab == "storeStatus" then
         r = { { title = "Статус магазина", sub = shopPaused and "ПРИОСТАНОВЛЕН" or "АКТИВЕН", raw = { paused = shopPaused } } }
@@ -493,10 +541,23 @@ local function selected(list)
     return list[ui.selected]
 end
 
+-- Загрузка формы для редактирования выбранного элемента
 local function loadForm()
     local e = selected(listData())
     ui.form = {}
-    if ui.tab == "users" then
+    if ui.tab == "buy" or ui.tab == "sell" then
+        local it = e and e.raw or {}
+        ui.form = {
+            displayName = tostring(it.displayName or ""),
+            internalName = tostring(it.internalName or ""),
+            damage = tostring(it.damage or 0),
+            priceCoin = trim(it.priceCoin or 0),
+            priceEma = trim(it.priceEma or 0),
+            article = tostring(it.article or ""),
+            enabled = it.enabled ~= false,
+            sourceIndex = e and e.sourceIndex or nil
+        }
+    elseif ui.tab == "users" then
         local u = e and e.raw or {}
         ui.form = {
             name = e and e.key or "",
@@ -519,8 +580,6 @@ local function loadForm()
         ui.form = { name = (e and e.raw and e.raw.name) or "", text = (e and e.raw and e.raw.text) or "", time = (e and e.raw and e.raw.time) or "" }
     elseif ui.tab == "admins" then
         ui.form = { adminName = ADMIN_NAME }
-    elseif ui.tab == "addItem" then
-        ui.form = { itemName = "" }
     elseif ui.tab == "journal" then
         ui.form = { journal = "Журнал событий (можно расширить)" }
     elseif ui.tab == "storeStatus" then
@@ -528,7 +587,9 @@ local function loadForm()
     end
 end
 
--- Отрисовка элементов
+-- ------------------------------------------------------------------
+-- 7. ОТРИСОВКА ИНТЕРФЕЙСА
+-- ------------------------------------------------------------------
 local function drawHeader()
     fill(1, 1, WIDTH, TOP, C.header)
     center(1, "──── PIM MARKET SERVER ────", C.accent, C.header)
@@ -571,13 +632,35 @@ local function drawList(list)
     write(3, MAIN_Y + MAIN_H - 2, info, C.gray, C.bg)
 end
 
--- Редакторы для каждой вкладки
+-- Редактор каталога (для вкладок ПОКУПКИ и ПРОДАЖИ)
+local function catalogEditor()
+    local x = RIGHT_X; local w = RIGHT_W
+    local title = (ui.tab == "buy" and "РЕДАКТОР ПОКУПКИ" or "РЕДАКТОР ПРОДАЖИ")
+    write(x, MAIN_Y + 1, title, C.accent, C.bg)
+    addField("displayName", "Название:", ui.form.displayName, x, MAIN_Y + 4, w - 2)
+    addField("internalName", "ID предмета:", ui.form.internalName, x, MAIN_Y + 6, w - 2)
+    addField("damage", "Damage:", ui.form.damage, x, MAIN_Y + 8, w - 2, { numeric = true })
+    addField("priceCoin", "COINA:", ui.form.priceCoin, x, MAIN_Y + 10, w - 2, { numeric = true })
+    addField("priceEma", "EMa:", ui.form.priceEma, x, MAIN_Y + 12, w - 2, { numeric = true })
+    addField("article", "Артикул:", ui.form.article, x, MAIN_Y + 14, w - 2)
+    write(x, MAIN_Y + 16, "Активен:", C.gray, C.bg)
+    addButton("toggle_enabled", "[ " .. (ui.form.enabled and "ДА" or "НЕТ") .. " ]", x + 15, MAIN_Y + 16, 10, ui.form.enabled and C.button or C.danger)
+    local y = MAIN_Y + 19
+    addButton("save_item", "[ СОХРАНИТЬ ]", x, y, 18, C.button)
+    addButton("new_item", "[ НОВЫЙ ]", x + 20, y, 14, C.alt)
+    addButton("delete_item", "[ УДАЛИТЬ ]", x + 36, y, 16, C.danger)
+    write(x, MAIN_Y + 22, "Всего товаров: " .. #getCatalog(ui.tab), C.gray, C.bg)
+end
+
+-- Остальные редакторы (пользователи, статистика, репорты, отзывы, админы, журнал, статус)
 local function drawRight(e)
     fill(RIGHT_X - 1, MAIN_Y, RIGHT_W + 1, MAIN_H, C.bg)
     box(RIGHT_X - 1, MAIN_Y, RIGHT_W + 1, MAIN_H, C.line, C.bg)
     local x = RIGHT_X; local w = RIGHT_W
 
-    if ui.tab == "users" then
+    if ui.tab == "buy" or ui.tab == "sell" then
+        catalogEditor()
+    elseif ui.tab == "users" then
         write(x, MAIN_Y + 1, "РЕДАКТОР ИГРОКА", C.accent, C.bg)
         addField("name", "Игрок:", ui.form.name, x, MAIN_Y + 4, w - 2, { readonly = true })
         addField("balance", "Баланс:", ui.form.balance, x, MAIN_Y + 6, w - 2, { numeric = true })
@@ -629,17 +712,11 @@ local function drawRight(e)
         addButton("add_admin", "[ ДОБАВИТЬ ]", x, y, 18, C.button)
         addButton("remove_admin", "[ УДАЛИТЬ ]", x + 20, y, 18, C.danger)
 
-    elseif ui.tab == "addItem" then
-        write(x, MAIN_Y + 1, "ДОБАВИТЬ ПРЕДМЕТ", C.accent, C.bg)
-        addField("itemName", "Название предмета:", ui.form.itemName or "", x, MAIN_Y + 4, w - 2)
-        addButton("add_item", "[ ОТПРАВИТЬ В КАТАЛОГ ]", x, MAIN_Y + 7, 28, C.button)
-
     elseif ui.tab == "journal" then
         write(x, MAIN_Y + 1, "ЖУРНАЛ СОБЫТИЙ", C.accent, C.bg)
         write(x, MAIN_Y + 4, "Все важные события записываются в консоль.", C.gray, C.bg)
         write(x, MAIN_Y + 6, "Для просмотра полного журнала используйте", C.gray, C.bg)
         write(x, MAIN_Y + 7, "команду: cat /home/reports.log", C.gray, C.bg)
-        write(x, MAIN_Y + 9, "Также можно расширить функционал.", C.gray, C.bg)
 
     elseif ui.tab == "storeStatus" then
         write(x, MAIN_Y + 1, "УПРАВЛЕНИЕ ДОСТУПНОСТЬЮ", C.accent, C.bg)
@@ -679,16 +756,75 @@ end
 local function reload() loadForm(); ui.activeField = nil; drawAll() end
 
 -- ------------------------------------------------------------------
--- 7. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
+-- 8. ОБРАБОТЧИКИ ДЕЙСТВИЙ (с поддержкой каталога)
 -- ------------------------------------------------------------------
 local function action(id)
     if id == "back" then
-        -- возврат в главное меню (переключение на вкладку "users")
-        ui.tab = "users"
+        ui.tab = "buy"
         ui.selected = 1
         ui.scroll = 0
         ui.search = ""
         ui.activeField = nil
+        reload()
+        return
+    end
+
+    if id == "toggle_enabled" then
+        ui.form.enabled = not ui.form.enabled
+        drawAll()
+        return
+    end
+
+    if id == "save_item" then
+        local name = fv("displayName")
+        local internal = fv("internalName")
+        if name == "" or internal == "" then
+            msg("Название и ID предмета обязательны", C.red)
+            drawAll()
+            return
+        end
+        local src = getCatalog(ui.tab)
+        local idx = ui.form.sourceIndex
+        local item = {
+            displayName = name,
+            internalName = internal,
+            damage = math.floor(num(fv("damage"), 0)),
+            priceCoin = num(fv("priceCoin"), 0),
+            priceEma = num(fv("priceEma"), 0),
+            article = fv("article"),
+            enabled = ui.form.enabled
+        }
+        if idx and src[idx] then
+            src[idx] = item
+        else
+            table.insert(src, item)
+        end
+        setCatalog(ui.tab, src)
+        msg("Товар сохранён", C.green)
+        ui.selected = 1
+        reload()
+        return
+    end
+
+    if id == "new_item" then
+        ui.form = { displayName = "", internalName = "", damage = "0", priceCoin = "0", priceEma = "0", article = "", enabled = true, sourceIndex = nil }
+        ui.activeField = nil
+        drawAll()
+        return
+    end
+
+    if id == "delete_item" then
+        local src = getCatalog(ui.tab)
+        local idx = ui.form.sourceIndex
+        if not idx or not src[idx] then
+            msg("Товар не выбран", C.red)
+            drawAll()
+            return
+        end
+        table.remove(src, idx)
+        setCatalog(ui.tab, src)
+        msg("Товар удалён", C.yellow)
+        ui.selected = math.max(1, ui.selected - 1)
         reload()
         return
     end
@@ -741,7 +877,6 @@ local function action(id)
     end
 
     if id == "resolve_report" then
-        -- разрешить репорт (удалить строку из reports.log)
         local e = selected(listData())
         if e and e.raw then
             local oldContent = ""
@@ -752,9 +887,7 @@ local function action(id)
             end
             local lines = {}
             for line in oldContent:gmatch("[^\n]+") do
-                if line ~= e.raw then
-                    table.insert(lines, line)
-                end
+                if line ~= e.raw then table.insert(lines, line) end
             end
             file = io.open(REPORTS_LOG, "w")
             if file then
@@ -792,10 +925,7 @@ local function action(id)
     if id == "add_admin" then
         local newAdmin = fv("new_admin")
         if newAdmin and newAdmin ~= "" then
-            -- в простой версии просто меняем ADMIN_NAME (можно расширить до списка)
-            -- но для демонстрации сохраняем как дополнительного админа в отдельной переменной
             msg("Администратор " .. newAdmin .. " добавлен (демо)", C.green)
-            -- в реальности можно хранить список админов в файле
             reload()
         else
             msg("Введите имя", C.red)
@@ -816,20 +946,6 @@ local function action(id)
         return
     end
 
-    if id == "add_item" then
-        local item = fv("itemName")
-        if item and item ~= "" then
-            logEvent("Добавлен предмет в каталог: " .. item)
-            msg("Предмет '" .. item .. "' добавлен в каталог", C.green)
-            ui.form.itemName = ""
-            drawAll()
-        else
-            msg("Введите название", C.red)
-            drawAll()
-        end
-        return
-    end
-
     if id == "toggle_pause" then
         shopPaused = not shopPaused
         msg(shopPaused and "Магазин закрыт" or "Магазин открыт", shopPaused and C.red or C.green)
@@ -839,7 +955,7 @@ local function action(id)
 end
 
 -- ------------------------------------------------------------------
--- 8. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
+-- 9. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
 -- ------------------------------------------------------------------
 local function inside(x, y, c) return y == c.y and x >= c.x and x < c.x + c.w end
 local function touch(x, y)
@@ -901,7 +1017,10 @@ local function key(char, code)
             local ch = unicode.char(char)
             if not f.numeric or ch:match("[%d%.,%-]") then f.value = f.value .. ch end
         end
-        if f.id == "name" or f.id == "balance" or f.id == "transactions" or f.id == "banReason" or f.id == "banDuration" or f.id == "bannedBy" or f.id == "new_admin" or f.id == "itemName" then
+        -- обновляем форму
+        if f.id == "displayName" or f.id == "internalName" or f.id == "damage" or f.id == "priceCoin" or f.id == "priceEma" or f.id == "article" then
+            ui.form[f.id] = f.value
+        elseif f.id == "name" or f.id == "balance" or f.id == "transactions" or f.id == "banReason" or f.id == "banDuration" or f.id == "bannedBy" or f.id == "new_admin" then
             ui.form[f.id] = f.value
         end
         drawAll(); return
@@ -919,12 +1038,11 @@ local function key(char, code)
 end
 
 -- ------------------------------------------------------------------
--- 9. ЗАПУСК
+-- 10. ЗАПУСК
 -- ------------------------------------------------------------------
 loadForm()
 drawAll()
 
--- основной цикл
 while true do
     local ev = { event.pull(0.25) }
     local name = ev[1]
@@ -951,7 +1069,7 @@ while true do
         print("Порты: 0xffef, 0xfffe")
         break
     end
-    -- автоматическое обновление (например, при изменении данных)
+    -- автоматическое обновление
     if computer.uptime() - ui.lastDraw > 2 then
         drawAll()
     end
