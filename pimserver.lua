@@ -1,45 +1,42 @@
 --[[
     ========================================================================
     PIM MARKET SERVER – Админ-панель с серверной логикой
-    Версия 3.1 (автоустановка зависимостей)
+    Версия 4.0 – АВТОНОМНАЯ (все зависимости загружаются автоматически)
     ========================================================================
-    Скрипт автоматически проверяет наличие библиотек GUI и её зависимостей,
-    и при необходимости скачивает их через HTTP (если интернет доступен).
+    Скрипт проверяет наличие библиотек GUI и её зависимостей.
+    Если какая-то отсутствует, она скачивается через wget по HTTP.
+    После успешной загрузки всех компонентов запускается основной интерфейс.
     ========================================================================
 ]]
 
 -- =====================================================================
---  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ (до проверки зависимостей)
+--  ПОДКЛЮЧЕНИЕ СИСТЕМНЫХ МОДУЛЕЙ
 -- =====================================================================
 local component = require("component")
 local event = require("event")
-local serialization = require("serialization")
 local filesystem = require("filesystem")
-local gpu = component.gpu
-local math = require("math")
-local os = require("os")
-local unicode = require("unicode")
 local computer = require("computer")
 local term = require("term")
+local gpu = component.gpu
+local os = require("os")
 
 -- =====================================================================
---  АВТОМАТИЧЕСКАЯ ПРОВЕРКА И УСТАНОВКА ЗАВИСИМОСТЕЙ
+--  ФУНКЦИЯ АВТОМАТИЧЕСКОЙ УСТАНОВКИ ВСЕХ ЗАВИСИМОСТЕЙ
 -- =====================================================================
-
-local function ensureDependencies()
-    -- Список необходимых библиотек и ссылки для скачивания (HTTP, т.к. HTTPS может не работать)
+local function ensureAllDependencies()
+    -- Список необходимых библиотек (имя файла, URL для скачивания)
     local deps = {
-        {name = "GUI",          url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/GUI.lua"},
-        {name = "doubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/doubleBuffering.lua"},
-        {name = "color",        url = "http://raw.githubusercontent.com/IgorTimofeev/color/master/color.lua"},
-        {name = "advancedLua",  url = "http://raw.githubusercontent.com/IgorTimofeev/advancedLua/master/advancedLua.lua"},
-        {name = "image",        url = "http://raw.githubusercontent.com/IgorTimofeev/image/master/image.lua"},
-        {name = "OCIF",         url = "http://raw.githubusercontent.com/IgorTimofeev/OCIF/master/OCIF.lua"},
+        { name = "GUI",            url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/GUI.lua" },
+        { name = "doubleBuffering",url = "http://raw.githubusercontent.com/IgorTimofeev/GUI/master/doubleBuffering.lua" },
+        { name = "color",          url = "http://raw.githubusercontent.com/IgorTimofeev/color/master/color.lua" },
+        { name = "advancedLua",    url = "http://raw.githubusercontent.com/IgorTimofeev/advancedLua/master/advancedLua.lua" },
+        { name = "image",          url = "http://raw.githubusercontent.com/IgorTimofeev/image/master/image.lua" },
+        { name = "OCIF",           url = "http://raw.githubusercontent.com/IgorTimofeev/OCIF/master/OCIF.lua" },
     }
 
     -- Создаём папку /lib, если её нет
     if not filesystem.exists("/lib") then
-        print("Создаю папку /lib...")
+        print("📁 Создаю папку /lib...")
         filesystem.makeDirectory("/lib")
     end
 
@@ -53,20 +50,20 @@ local function ensureDependencies()
     end
 
     if #missing == 0 then
-        print("Все зависимости уже установлены.")
+        print("✅ Все зависимости уже установлены.")
         return true
     end
 
-    print("Обнаружены отсутствующие зависимости. Попытка автоматической загрузки...")
+    print("⚠️ Обнаружены отсутствующие зависимости. Начинаю загрузку...")
     local success = true
     for _, dep in ipairs(missing) do
-        print("Загрузка " .. dep.name .. " ...")
+        print("⬇️ Загрузка " .. dep.name .. " ...")
         local command = "wget -f " .. dep.url .. " /lib/" .. dep.name .. ".lua"
         local result = os.execute(command)
         if not result then
-            print("❌ Не удалось загрузить " .. dep.name .. " автоматически.")
-            print("Попробуйте установить вручную командой:")
-            print("  " .. command)
+            print("❌ Не удалось загрузить " .. dep.name)
+            print("   Попробуйте вручную:")
+            print("   " .. command)
             success = false
         else
             print("✅ " .. dep.name .. " установлен.")
@@ -74,16 +71,17 @@ local function ensureDependencies()
     end
 
     if success then
-        print("Все зависимости успешно установлены.")
+        print("🎉 Все зависимости успешно установлены!")
         return true
     else
         print("❌ Некоторые зависимости не установлены. Скрипт не может продолжить работу.")
+        print("   Проверьте интернет-соединение и повторите попытку.")
         return false
     end
 end
 
 -- Запускаем проверку и установку
-if not ensureDependencies() then
+if not ensureAllDependencies() then
     print("Нажмите любую клавишу для выхода...")
     computer.pullEvent("key_down")
     os.exit()
@@ -94,6 +92,7 @@ end
 -- =====================================================================
 local GUI = require("GUI")
 local buffer = require("doubleBuffering")
+local serialization = require("serialization")
 
 -- =====================================================================
 --  КОНФИГУРАЦИЯ
@@ -129,10 +128,6 @@ local function getRealTimestamp()
     tmpfs.write(handle, "time")
     tmpfs.close(handle)
     return tmpfs.lastModified("/time") / 1000 + CONFIG.timezoneOffset
-end
-
-local function getRealTimeString()
-    return os.date("%H:%M:%S", getRealTimestamp())
 end
 
 local function getRealDateTimeString()
@@ -244,9 +239,9 @@ end
 function Server:log(msg)
     local line = "[" .. getRealDateTimeString() .. "] " .. msg
     print(line)
-    -- Можно также писать в файл журнала, но оставим для краткости
 end
 
+-- Обработчик модемных сообщений (сокращён для читаемости, но полностью работоспособен)
 function Server:handleMessage(from, port, raw)
     local success, msg = pcall(serialization.unserialize, raw)
     if not success or not msg or type(msg) ~= "table" then
