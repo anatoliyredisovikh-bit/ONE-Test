@@ -1,6 +1,6 @@
 -- ============================================================
 -- PRIMARKET – клиент для PIM MARKET SERVER
--- Версия 2.1 – исправлены артефакты (полная перерисовка)
+-- Версия 2.2 – исправлены артефакты (усиленная очистка)
 -- ============================================================
 
 local component = require("component")
@@ -82,6 +82,7 @@ local colors = {
 local function clear()
     gpu.setBackground(colors.bg_main)
     gpu.fill(1, 1, 80, 25, " ")
+    gpu.sync()  -- принудительное обновление экрана
 end
 
 local function drawCenteredText(y, text, color)
@@ -536,6 +537,7 @@ local function drawTempMessage()
         gpu.setBackground(colors.bg_main)
         gpu.fill(1, 25, 80, 1, " ")
     end
+    gpu.sync()
 end
 
 local function showTempMessage(msg, duration)
@@ -1816,7 +1818,6 @@ while true do
     elseif name == "scroll" then
         local direction = ev[5] or 0
         if currentScreen == "shop_buy" or currentScreen == "shop_sell" then
-            -- Полная перерисовка вместо smoothScroll для избежания артефактов
             local total = #filteredItems
             local maxScroll = math.max(1, total - visibleRows + 1)
             listScroll = math.max(1, math.min(listScroll - direction, maxScroll))
