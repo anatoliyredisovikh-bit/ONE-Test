@@ -1,6 +1,6 @@
 -- ============================================================
--- PRIMARKET – клиент для PIM MARKET SERVER (с синхронизацией)
--- Версия 7.0 – полная интеграция с серверным каталогом
+-- PRIMARKET – клиент для PIM MARKET SERVER (финальная версия)
+-- Версия 7.1 – кнопка синхронизации удалена, синхронизация при выходе
 -- ============================================================
 
 local component = require("component")
@@ -307,7 +307,7 @@ local tempMessage = ""
 local tempMessageTimer = nil
 
 -- ================================================================
---  ФУНКЦИИ СИНХРОНИЗАЦИИ КАТАЛОГА (НОВЫЕ)
+--  ФУНКЦИИ СИНХРОНИЗАЦИИ КАТАЛОГА
 -- ================================================================
 
 local function updateSellCatalog(newItems)
@@ -389,7 +389,7 @@ local function startSyncTimer()
 end
 
 -- ================================================================
---  ОСТАЛЬНЫЕ ФУНКЦИИ (UI, магазин и т.д.) – без изменений
+--  ОСТАЛЬНЫЕ ФУНКЦИИ (UI, магазин и т.д.)
 -- ================================================================
 
 local function updateSelectorDisplay(item)
@@ -587,9 +587,11 @@ local function drawFeedbackInputScreen()
     drawTempMessage()
 end
 
+-- ================================================================
+-- ГЛАВНОЕ МЕНЮ (БЕЗ КНОПКИ СИНХРОНИЗАЦИИ)
+-- ================================================================
 local menuButtons = {
     shop    = {x=32, xs=20, y=9,  ys=3, text="🛒 Магазин",     tx=6, ty=1, bg=colors.bg_button, fg=colors.accent_main},
-    sync    = {x=32, xs=20, y=13, ys=3, text="🔄 Синхр.",       tx=5, ty=1, bg=colors.bg_button, fg=colors.success},
     account = {x=32, xs=20, y=17, ys=3, text="👤 Аккаунт",      tx=6, ty=1, bg=colors.bg_button, fg=colors.accent_main}
 }
 
@@ -2030,7 +2032,7 @@ local function refreshAndAgree()
 end
 
 -- ================================================================
---  ОБРАБОТЧИК МОДЕМНЫХ СООБЩЕНИЙ (ДОБАВЛЕНА ОБРАБОТКА PUSH)
+--  ОСНОВНОЙ ЦИКЛ (С СИНХРОНИЗАЦИЕЙ ПРИ ВЫХОДЕ С PIM)
 -- ================================================================
 
 local function main()
@@ -2138,6 +2140,7 @@ local function main()
                 end
                 goto continue
             elseif currentScreen == "shop_buy" or currentScreen == "shop_sell" then
+                -- (остальной код обработки магазина без изменений)
                 if y >= 7 and y <= 21 and x >= 2 and x <= 77 then
                     local relativeRow = y - 6
                     local clickedIndex = listScroll + relativeRow - 1
@@ -2226,6 +2229,7 @@ local function main()
                     goto continue
                 end
             elseif currentScreen == "purchase" then
+                -- (код покупки без изменений)
                 if (y >= 24 and y <= 24) and (x >= 19 and x <= 28) then
                     if currentShopMode == "buy" then
                         currentScreen = "shop_buy"
@@ -2291,13 +2295,6 @@ local function main()
                             else
                                 showShopDenied = true
                                 drawMainMenu()
-                            end
-                        elseif name == "sync" then
-                            if currentToken then
-                                requestCatalog()
-                                showTempMessage("🔄 Запрос синхронизации отправлен", 2)
-                            else
-                                showTempMessage("❌ Сначала войдите в аккаунт!", 2)
                             end
                         elseif name == "account" then
                             showShopDenied = false
@@ -2384,6 +2381,7 @@ local function main()
                     end
                 end
             elseif currentScreen == "feedbacks" then
+                -- (код отзывов без изменений)
                 if isButtonClicked({x=5, y=24, xs=11, ys=1}, x, y) then
                     currentScreen = "menu"
                     drawMainMenu()
@@ -2550,6 +2548,15 @@ local function main()
                 modem.send(serverAddress, 0xffef, serialization.serialize({op="enter", name=currentPlayer}))
             end
         elseif e == "player_off" or e == "pim_player_leave" then
+            local playerName = ev[2] or "Игрок"
+            writeDebugLog("👤 Игрок ушёл с PIM: " .. playerName)
+            
+            -- ★★★ ВЫПОЛНЯЕМ СИНХРОНИЗАЦИЮ ПРИ ВЫХОДЕ ★★★
+            if currentToken then
+                requestCatalog()
+                writeDebugLog("📤 Запрос каталога при выходе с PIM")
+            end
+            
             currentPlayer = nil
             currentToken = nil
             alreadyAuthorized = false
@@ -2565,14 +2572,14 @@ local function main()
                 syncTimer = nil
             end
             drawWelcomeScreen()
-        -- Обработка модемных сообщений (ДОБАВЛЕНА ОБРАБОТКА PUSH)
+        -- Обработка модемных сообщений
         elseif e == "modem_message" then
             local sender = ev[3]
             local data = ev[6]
             if sender == serverAddress then
                 local success, msg = pcall(serialization.unserialize, data)
                 if success and msg then
-                    -- ★★★ НОВЫЙ БЛОК: ПРИЁМ PUSH-УВЕДОМЛЕНИЙ ★★★
+                    -- Push-уведомления
                     if msg.op == "push" then
                         if msg.action == "catalog_update" and msg.data and msg.data.catalog == "sell" then
                             writeDebugLog("📥 Получен push: обновление каталога скупки от " .. sender)
@@ -2582,7 +2589,7 @@ local function main()
                         goto continue
                     end
 
-                    -- Остальные сообщения (welcome, accountData и т.д.)
+                    -- Остальные сообщения
                     if msg.op == "welcome" and msg.token then
                         currentToken = msg.token
                         coinBalance = msg.balance or 0.0
@@ -2602,7 +2609,6 @@ local function main()
                         if currentScreen == "auth" or currentScreen == "account_loading" then
                             currentScreen = "menu"
                             drawMainMenu()
-                            -- ★★★ ЗАПРОС КАТАЛОГА ПРИ ВХОДЕ ★★★
                             requestCatalog()
                             startSyncTimer()
                         end
