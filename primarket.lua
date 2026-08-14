@@ -1,6 +1,6 @@
 -- ============================================================
 -- PRIMARKET – клиент для PIM MARKET SERVER
--- Версия 2.2 – исправлены артефакты (усиленная очистка)
+-- Версия 2.3 – исправлена ошибка с gpu.sync
 -- ============================================================
 
 local component = require("component")
@@ -82,7 +82,6 @@ local colors = {
 local function clear()
     gpu.setBackground(colors.bg_main)
     gpu.fill(1, 1, 80, 25, " ")
-    gpu.sync()  -- принудительное обновление экрана
 end
 
 local function drawCenteredText(y, text, color)
@@ -537,7 +536,6 @@ local function drawTempMessage()
         gpu.setBackground(colors.bg_main)
         gpu.fill(1, 25, 80, 1, " ")
     end
-    gpu.sync()
 end
 
 local function showTempMessage(msg, duration)
