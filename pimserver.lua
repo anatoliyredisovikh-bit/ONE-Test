@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.4
--- Исправлен порядок определения функций (logEvent перенесён выше)
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.5
+-- Автоматическая синхронизация каталога с терминалами
 -- ============================================================
 
 local component = require("component")
@@ -75,7 +75,7 @@ local markets = {}
 local shopPaused = false
 
 -- ------------------------------------------------------------------
--- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ (определена РАНЬШЕ всех, кто её использует)
+-- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ
 -- ------------------------------------------------------------------
 local function logEvent(msg)
     local line = "[" .. getRealDateTimeString() .. "] " .. msg
@@ -106,12 +106,18 @@ end
 -- ------------------------------------------------------------------
 local function directPush(address, action, data)
     if address and address ~= "" then
-        modem.send(address, 0xffef, serialization.serialize({op="push", action=action, data=data}))
+        local msg = serialization.serialize({op="push", action=action, data=data})
+        modem.send(address, 0xffef, msg)
+        modem.send(address, 0xfffe, msg)
+        logEvent("Push отправлен на " .. address .. " (порты 0xffef, 0xfffe)")
     end
 end
 
 local function broadcast(action, data)
-    modem.broadcast(0xffef, serialization.serialize({op="push", action=action, data=data}))
+    local msg = serialization.serialize({op="push", action=action, data=data})
+    modem.broadcast(0xffef, msg)
+    modem.broadcast(0xfffe, msg)
+    logEvent("Broadcast отправлен (порты 0xffef, 0xfffe)")
 end
 
 local function broadcastSellCatalog()
@@ -120,14 +126,15 @@ local function broadcastSellCatalog()
         catalog = "sell",
         items = sellCatalog
     }
+    local count = 0
     for address, info in pairs(terminals) do
         directPush(address, "catalog_update", data)
+        count = count + 1
     end
     broadcast("catalog_update", data)
-    logEvent("Каталог скупки разослан терминалам")
+    logEvent("Каталог скупки разослан: " .. count .. " терминалам + broadcast")
 end
 
--- Сохранение каталога с последующей рассылкой
 local function saveCatalog()
     local file = io.open(CATALOG_PATH, "w")
     file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
@@ -135,7 +142,6 @@ local function saveCatalog()
     broadcastSellCatalog()
 end
 
--- Регистрация терминала
 local function registerTerminal(address, id)
     if not terminals[address] then
         terminals[address] = { address = address, id = id or "TERM-"..tostring(address):sub(1,8), lastSeen = computer.uptime() }
@@ -196,7 +202,6 @@ if filesystem.exists(CATALOG_PATH) then
     end
 end
 
--- Импорт из shop_items.lua, если каталог пуст
 local function importSellItemsFromFile()
     if not filesystem.exists(SHOP_ITEMS_FILE) then
         return false
@@ -453,6 +458,17 @@ local function handleOldRequest(from, port, msg)
             catalog = "sell",
             items = sellCatalog
         }))
+        logEvent("Клиент " .. from .. " запросил каталог")
+        return
+
+    elseif op == "sync_catalog" then
+        if not isAdmin(from) then
+            modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
+            return
+        end
+        broadcastSellCatalog()
+        modem.send(from, 0xffef, serialization.serialize({op="sync_catalog_response", success=true}))
+        logEvent("Принудительная синхронизация каталога по запросу от " .. from)
         return
 
     elseif op == "add_catalog_item" then
@@ -544,7 +560,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 10. АДМИН-ПАНЕЛЬ (полностью без изменений)
+-- 10. АДМИН-ПАНЕЛЬ
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
