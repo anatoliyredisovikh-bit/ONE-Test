@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – версия 7.1
--- Автоустановка DoubleBuffering + устранение мерцания
+-- PIM MARKET SERVER (UNIFIED) – версия 7.2
+-- Исправлена загрузка DoubleBuffering (добавлен dofile и поиск по путям)
 -- ============================================================
 
 local component = require("component")
@@ -21,11 +21,11 @@ local modem = component.modem
 local gpu = component.gpu
 
 -- ------------------------------------------------------------------
--- 0. АВТОМАТИЧЕСКАЯ УСТАНОВКА DOUBLEBUFFERING (надёжная)
+-- 0. АВТОМАТИЧЕСКАЯ УСТАНОВКА DOUBLEBUFFERING (исправленная)
 -- ------------------------------------------------------------------
 local function ensureDoubleBuffering()
-    -- Пробуем загрузить разными способами
     local buffer = nil
+    -- пробуем разные имена
     local ok, mod = pcall(require, "DoubleBuffering")
     if ok then buffer = mod end
     if not buffer then
@@ -35,20 +35,20 @@ local function ensureDoubleBuffering()
     if buffer then
         return buffer
     end
-    
+
     print("⚠️ Библиотека DoubleBuffering не найдена. Пытаюсь установить...")
-    
+
     -- Проверяем наличие интернета
     local internet_ok = component.isAvailable("internet")
     local has_wget = pcall(os.execute, "which wget")
-    
-    -- Сначала пробуем официальный установщик (самый надёжный)
+
+    -- Пробуем официальный установщик (может не работать, но попробуем)
     if internet_ok then
         print("⬇️ Запуск официального установщика DoubleBuffering...")
         local result = os.execute("pastebin run vTM8nbSZ")
         if result then
             print("✅ Установка завершена")
-            -- Пробуем загрузить снова
+            -- пробуем загрузить снова
             ok, mod = pcall(require, "DoubleBuffering")
             if ok then return mod end
             ok, mod = pcall(require, "doubleBuffering")
@@ -57,8 +57,8 @@ local function ensureDoubleBuffering()
             print("⚠️ Официальный установщик не сработал, пробуем ручную загрузку...")
         end
     end
-    
-    -- Если официальный установщик не помог, пробуем скачать вручную
+
+    -- Ручная загрузка файлов
     local deps = {
         { name = "DoubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua" },
         { name = "advancedLua",     url = "http://raw.githubusercontent.com/IgorTimofeev/AdvancedLua/master/AdvancedLua.lua" },
@@ -66,12 +66,11 @@ local function ensureDoubleBuffering()
         { name = "image",           url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/Image.lua" },
         { name = "OCIF",            url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/OCIF.lua" },
     }
-    
+
     if not filesystem.exists("/lib") then
         filesystem.makeDirectory("/lib")
     end
-    
-    local downloaded = false
+
     for _, dep in ipairs(deps) do
         local path = "/lib/" .. dep.name .. ".lua"
         if not filesystem.exists(path) then
@@ -80,27 +79,43 @@ local function ensureDoubleBuffering()
             local result = os.execute(command)
             if result and filesystem.exists(path) then
                 print("✅ " .. dep.name .. " сохранён")
-                downloaded = true
             else
                 print("❌ Не удалось загрузить " .. dep.name)
             end
         end
     end
-    
-    if downloaded then
-        print("✅ Попытка загрузки DoubleBuffering после ручной установки...")
-        ok, mod = pcall(require, "DoubleBuffering")
-        if ok then return mod end
-        ok, mod = pcall(require, "doubleBuffering")
-        if ok then return mod end
+
+    -- После ручной загрузки пробуем загрузить через dofile
+    local paths = {"/lib/DoubleBuffering.lua", "/lib/doubleBuffering.lua"}
+    for _, p in ipairs(paths) do
+        if filesystem.exists(p) then
+            local ok, mod = pcall(dofile, p)
+            if ok and mod then
+                buffer = mod
+                break
+            end
+        end
     end
-    
-    -- Если ничего не помогло, выводим инструкцию
-    print("❌ Не удалось установить DoubleBuffering.")
+
+    -- Если dofile не сработал, пробуем require ещё раз
+    if not buffer then
+        ok, mod = pcall(require, "DoubleBuffering")
+        if ok then buffer = mod end
+    end
+    if not buffer then
+        ok, mod = pcall(require, "doubleBuffering")
+        if ok then buffer = mod end
+    end
+
+    if buffer then
+        print("✅ DoubleBuffering успешно загружена!")
+        return buffer
+    end
+
+    print("❌ Не удалось загрузить DoubleBuffering.")
     print("Пожалуйста, установите вручную командой:")
     print("  pastebin run vTM8nbSZ")
-    print("Или скачайте файлы из репозитория:")
-    print("  https://github.com/IgorTimofeev/DoubleBuffering")
+    print("Или скопируйте файлы из репозитория в /lib/")
     print("Нажмите любую клавишу для выхода...")
     computer.pullEvent("key_down")
     os.exit()
