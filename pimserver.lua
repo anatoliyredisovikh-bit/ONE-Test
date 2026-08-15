@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – версия 7.0
--- Интеграция DoubleBuffering – полное устранение мерцания
+-- PIM MARKET SERVER (UNIFIED) – версия 7.1
+-- Автоустановка DoubleBuffering + устранение мерцания
 -- ============================================================
 
 local component = require("component")
@@ -21,101 +21,99 @@ local modem = component.modem
 local gpu = component.gpu
 
 -- ------------------------------------------------------------------
--- 0. АВТОМАТИЧЕСКАЯ УСТАНОВКА DOUBLEBUFFERING И ЗАВИСИМОСТЕЙ
+-- 0. АВТОМАТИЧЕСКАЯ УСТАНОВКА DOUBLEBUFFERING (надёжная)
 -- ------------------------------------------------------------------
 local function ensureDoubleBuffering()
-    local ok, _ = pcall(require, "doubleBuffering")
-    if ok then
-        return true
+    -- Пробуем загрузить разными способами
+    local buffer = nil
+    local ok, mod = pcall(require, "DoubleBuffering")
+    if ok then buffer = mod end
+    if not buffer then
+        ok, mod = pcall(require, "doubleBuffering")
+        if ok then buffer = mod end
+    end
+    if buffer then
+        return buffer
     end
     
     print("⚠️ Библиотека DoubleBuffering не найдена. Пытаюсь установить...")
     
-    -- Список необходимых файлов
+    -- Проверяем наличие интернета
+    local internet_ok = component.isAvailable("internet")
+    local has_wget = pcall(os.execute, "which wget")
+    
+    -- Сначала пробуем официальный установщик (самый надёжный)
+    if internet_ok then
+        print("⬇️ Запуск официального установщика DoubleBuffering...")
+        local result = os.execute("pastebin run vTM8nbSZ")
+        if result then
+            print("✅ Установка завершена")
+            -- Пробуем загрузить снова
+            ok, mod = pcall(require, "DoubleBuffering")
+            if ok then return mod end
+            ok, mod = pcall(require, "doubleBuffering")
+            if ok then return mod end
+        else
+            print("⚠️ Официальный установщик не сработал, пробуем ручную загрузку...")
+        end
+    end
+    
+    -- Если официальный установщик не помог, пробуем скачать вручную
     local deps = {
-        { name = "doubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua" },
+        { name = "DoubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua" },
         { name = "advancedLua",     url = "http://raw.githubusercontent.com/IgorTimofeev/AdvancedLua/master/AdvancedLua.lua" },
         { name = "color",           url = "http://raw.githubusercontent.com/IgorTimofeev/Color/master/Color.lua" },
         { name = "image",           url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/Image.lua" },
         { name = "OCIF",            url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/OCIF.lua" },
     }
     
-    -- Создаём /lib если нет
     if not filesystem.exists("/lib") then
         filesystem.makeDirectory("/lib")
     end
     
-    local internet_ok = component.isAvailable("internet")
-    local has_wget = os.execute("which wget") == 0
-    
-    if not internet_ok and not has_wget then
-        print("❌ Нет интернета и wget. Установите библиотеку вручную:")
-        print("   pastebin run vTM8nbSZ")
-        return false
-    end
-    
+    local downloaded = false
     for _, dep in ipairs(deps) do
         local path = "/lib/" .. dep.name .. ".lua"
         if not filesystem.exists(path) then
             print("⬇️ Загрузка " .. dep.name .. " ...")
-            local command
-            if has_wget then
-                command = "wget -f " .. dep.url .. " " .. path
+            local command = "wget -f " .. dep.url .. " " .. path
+            local result = os.execute(command)
+            if result and filesystem.exists(path) then
+                print("✅ " .. dep.name .. " сохранён")
+                downloaded = true
             else
-                -- пробуем через internet.request
-                local internet = require("internet")
-                local ok, response = pcall(function()
-                    return internet.request(dep.url)
-                end)
-                if ok and response then
-                    local content = ""
-                    for chunk in response do
-                        content = content .. chunk
-                    end
-                    local file = io.open(path, "w")
-                    if file then
-                        file:write(content)
-                        file:close()
-                        print("✅ " .. dep.name .. " сохранён")
-                    else
-                        print("❌ Не удалось записать " .. dep.name)
-                    end
-                else
-                    print("❌ Не удалось загрузить " .. dep.name)
-                end
-            end
-            if has_wget then
-                os.execute(command)
-                if filesystem.exists(path) then
-                    print("✅ " .. dep.name .. " установлен")
-                else
-                    print("❌ Не удалось установить " .. dep.name)
-                end
+                print("❌ Не удалось загрузить " .. dep.name)
             end
         end
     end
     
-    -- Проверяем, установилась ли библиотека
-    local ok2, _ = pcall(require, "doubleBuffering")
-    if ok2 then
-        print("✅ DoubleBuffering успешно установлена!")
-        return true
-    else
-        print("❌ Не удалось установить DoubleBuffering. Попробуйте вручную:")
-        print("   pastebin run vTM8nbSZ")
-        return false
+    if downloaded then
+        print("✅ Попытка загрузки DoubleBuffering после ручной установки...")
+        ok, mod = pcall(require, "DoubleBuffering")
+        if ok then return mod end
+        ok, mod = pcall(require, "doubleBuffering")
+        if ok then return mod end
     end
-end
-
-if not ensureDoubleBuffering() then
+    
+    -- Если ничего не помогло, выводим инструкцию
+    print("❌ Не удалось установить DoubleBuffering.")
+    print("Пожалуйста, установите вручную командой:")
+    print("  pastebin run vTM8nbSZ")
+    print("Или скачайте файлы из репозитория:")
+    print("  https://github.com/IgorTimofeev/DoubleBuffering")
     print("Нажмите любую клавишу для выхода...")
     computer.pullEvent("key_down")
     os.exit()
 end
 
--- Подключаем буфер
-local buffer = require("doubleBuffering")
-local color = require("color") -- может понадобиться для цветов
+-- Загружаем DoubleBuffering (гарантированно)
+local buffer = ensureDoubleBuffering()
+
+-- Подключаем дополнительные модули (если они потребуются)
+pcall(require, "advancedLua")
+pcall(require, "color")
+pcall(require, "image")
+pcall(require, "OCIF")
 
 -- ------------------------------------------------------------------
 -- 1. КОНФИГУРАЦИЯ
@@ -776,7 +774,6 @@ end
 -- Привязываем буфер к видеокарте
 buffer.bindGPU(gpu)
 buffer.setResolution(WIDTH, HEIGHT)
--- Устанавливаем фоновый цвет буфера (чтобы не было артефактов)
 buffer.setBackground(0x0C0C0C)
 
 local C = {
@@ -831,10 +828,8 @@ end
 local function box(x, y, w, h, fg, bg)
     if w < 2 or h < 2 then return end
     fg = fg or C.line; bg = bg or C.bg
-    -- Верхняя и нижняя границы
     write(x, y, "┌" .. string.rep("─", w - 2) .. "┐", fg, bg)
     write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
-    -- Боковые границы
     for r = y + 1, y + h - 2 do
         write(x, r, "│", fg, bg)
         write(x + w - 1, r, "│", fg, bg)
@@ -1137,7 +1132,6 @@ local function drawRight(e)
         drawField(f, ui.activeField == i)
     end
 
-    -- Вывод описания внизу правой панели с переносом на несколько строк
     local desc = tabDescriptions[ui.tab]
     if desc then
         local lines = wrapText(desc, RIGHT_W - 2)
@@ -1201,9 +1195,7 @@ local function drawBottom()
 end
 
 local function drawAll()
-    -- Очищаем экран перед отрисовкой (только один раз за кадр)
     buffer.clear(1, 1, WIDTH, HEIGHT, C.bg)
-    
     clearControls()
     drawHeader()
     local list = listData()
@@ -1213,8 +1205,6 @@ local function drawAll()
     drawRight(e)
     drawBottom()
     ui.lastDraw = computer.uptime()
-    
-    -- Применяем изменения на экран
     buffer.drawChanges()
 end
 
@@ -1304,7 +1294,6 @@ local function action(id)
         if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
         local player = players[name]
         if not player then msg("Игрок не найден", C.red); drawAll(); return end
-        local oldBalance = player.balance
         player.balance = num(fv("balance"), player.balance)
         player.banReason = fv("banReason")
         player.banDuration = math.max(0, math.floor(num(fv("banDuration"), 0)))
