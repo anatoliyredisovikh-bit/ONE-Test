@@ -1,7 +1,6 @@
 -- ============================================================
 -- VIPCLIENT – клиент для VIP-SHOP MODEM SERVER
--- Версия 5.1 (с фиксированным адресом сервера)
--- Полный файл, готовый к запуску
+-- Версия 5.2 (исправлена синтаксическая ошибка)
 -- ============================================================
 
 local component = require("component")
@@ -21,10 +20,9 @@ local modem = component.modem
 local gpu = component.gpu
 
 -- ============================================================
---  АДРЕС СЕРВЕРА (фиксированный из старых файлов)
+--  АДРЕС СЕРВЕРА (фиксированный)
 -- ============================================================
 local SERVER_ADDRESS = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
--- Можно переопределить через файл /home/server_address.dat
 if fs.exists("/home/server_address.dat") then
     local file = io.open("/home/server_address.dat", "r")
     if file then
@@ -42,7 +40,7 @@ local SERVER_PORT = 3410
 local CLIENT_PORT = 3411
 local CHUNK_SIZE = 6000
 
-local serverAddress = SERVER_ADDRESS  -- используем фиксированный адрес
+local serverAddress = SERVER_ADDRESS
 local pendingRequests = {}
 
 local function writeDebugLog(msg)
@@ -55,10 +53,7 @@ local function writeDebugLog(msg)
     end)
 end
 
--- Поиск сервера не требуется, адрес известен
-local function discoverServer()
-    return true
-end
+local function discoverServer() return true end
 
 local function sendRequest(action, payload, callback)
     if not serverAddress then
@@ -94,7 +89,7 @@ local function sendRequest(action, payload, callback)
     pendingRequests[requestId].timer = timer
 
     modem.send(serverAddress, SERVER_PORT, PROTOCOL, "request", NETWORK_KEY, requestId, CLIENT_PORT, data)
-    writeDebugLog("📤 Запрос " .. action .. " (ID=" .. requestId .. ") отправлен на " .. serverAddress)
+    writeDebugLog("📤 Запрос " .. action .. " (ID=" .. requestId .. ")")
 end
 
 local function processChunk(requestId, chunk, total, index)
@@ -174,9 +169,8 @@ local function sendRequestSync(action, payload, timeout)
 end
 
 -- ============================================================
---  ОСНОВНЫЕ ФУНКЦИИ КЛИЕНТА
+--  ОСНОВНЫЕ ПЕРЕМЕННЫЕ
 -- ============================================================
-
 local currentPlayer = nil
 local coinBalance = 0.0
 local emaBalance = 0.0
@@ -187,7 +181,6 @@ local playerBanned = false
 local banReason = ""
 local shopPaused = false
 
--- Каталоги
 local buyCatalog = {}
 local sellCatalog = {}
 local catalogMode = "buy"
@@ -293,7 +286,7 @@ local searchQuery = ""
 local searchFocused = false
 local qtyFocused = false
 
--- PIM и ME функции
+-- PIM и ME
 local function getPimAddr()
     for addr in component.list("pim") do return addr end
     return nil
@@ -566,7 +559,7 @@ local function performSell(item, qty)
     end
 end
 
--- UI функции
+-- UI
 local function filterItems()
     items = {}
     if searchQuery == "" then
@@ -850,7 +843,7 @@ local function scroll(delta)
 end
 
 -- ============================================================
---  ОБРАБОТЧИКИ СОБЫТИЙ
+--  ОБРАБОТЧИКИ
 -- ============================================================
 
 local function handleClick(x, y)
