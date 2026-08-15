@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.8
--- Многострочные подсказки для вкладок + загрузка из репозитория
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.9
+-- Исправлены баги: мерцание, синхронизация, откат баланса, остаток при продаже
 -- ============================================================
 
 local component = require("component")
@@ -90,6 +90,9 @@ local sessions = {}
 local owner = nil
 local markets = {}
 local shopPaused = false
+
+-- Флаг для перерисовки (чтобы не мерцало)
+local needsRedraw = false
 
 -- ------------------------------------------------------------------
 -- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ
@@ -457,12 +460,27 @@ local function handleOldRequest(from, port, msg)
         local player = players[msg.name]
         if not player or player.banned then return end
         local value = tonumber(msg.value) or 0
+        
+        -- ★★★ УМЕНЬШАЕМ ОСТАТОК ТОВАРА В КАТАЛОГЕ ★★★
+        local qtySold = tonumber(msg.qty) or 0
+        if qtySold > 0 then
+            for i, item in ipairs(sellCatalog) do
+                if item.internalName == msg.internalName and item.damage == (tonumber(msg.damage) or 0) then
+                    local oldQty = item.maxQty or 0
+                    item.maxQty = math.max(0, oldQty - qtySold)
+                    logEvent(string.format("📉 Остаток товара '%s' уменьшен: %d -> %d", item.displayName, oldQty, item.maxQty))
+                    saveCatalog()
+                    break
+                end
+            end
+        end
+        
         player.balance = (player.balance or 0) + value
         player.transactions = (player.transactions or 0) + 1
         sessions[msg.name].lastAction = os.time()
         globalStats.totalSells = (globalStats.totalSells or 0) + 1
         savePlayers(); saveGlobalStats()
-        logEvent(string.format("💰 %s продал(а) предмет '%s' x%d за %.2f", msg.name, msg.item, msg.qty or 0, value))
+        logEvent(string.format("💰 %s продал(а) предмет '%s' x%d за %.2f", msg.name, msg.item, qtySold, value))
         return
 
     elseif op == "buy" then
@@ -785,6 +803,7 @@ end
 local function setCatalog(tab, catalog)
     if tab == "buy" then buyCatalog = catalog else sellCatalog = catalog end
     saveCatalog()
+    needsRedraw = true
 end
 
 local function listData()
@@ -1074,9 +1093,10 @@ local function drawAll()
     drawRight(e)
     drawBottom()
     ui.lastDraw = computer.uptime()
+    needsRedraw = false
 end
 
-local function reload() loadForm(); ui.activeField = nil; drawAll() end
+local function reload() loadForm(); ui.activeField = nil; needsRedraw = true; drawAll() end
 
 -- ------------------------------------------------------------------
 -- 11. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
@@ -1158,12 +1178,15 @@ local function action(id)
         if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
         local player = players[name]
         if not player then msg("Игрок не найден", C.red); drawAll(); return end
+        local oldBalance = player.balance
         player.balance = num(fv("balance"), player.balance)
         player.banReason = fv("banReason")
         player.banDuration = math.max(0, math.floor(num(fv("banDuration"), 0)))
         player.bannedBy = fv("bannedBy")
         savePlayers()
-        msg("Данные игрока сохранены", C.green)
+        -- ★★★ РАССЫЛАЕМ ОБНОВЛЕНИЕ БАЛАНСА ТЕРМИНАЛАМ ★★★
+        broadcast("user_updated", { player = name, balance = player.balance })
+        msg("Данные игрока сохранены, баланс обновлён", C.green)
         reload()
         return
     end
@@ -1179,6 +1202,7 @@ local function action(id)
         player.bannedBy = fv("bannedBy") ~= "" and fv("bannedBy") or ADMIN_NAME
         player.bannedAt = stamp()
         savePlayers()
+        broadcast("user_updated", { player = name, banned = true })
         msg("Игрок заблокирован", C.red)
         reload()
         return
@@ -1195,6 +1219,7 @@ local function action(id)
         player.bannedBy = nil
         player.bannedAt = nil
         savePlayers()
+        broadcast("user_updated", { player = name, banned = false })
         msg("Игрок разблокирован", C.green)
         reload()
         return
@@ -1404,7 +1429,9 @@ while true do
         print("Порты: 0xffef, 0xfffe")
         break
     end
-    if computer.uptime() - ui.lastDraw > 2 then
+
+    -- ★★★ ПЕРЕРИСОВКА ТОЛЬКО ПРИ НЕОБХОДИМОСТИ ★★★
+    if needsRedraw then
         drawAll()
     end
 end
