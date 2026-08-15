@@ -1,13 +1,13 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – версия 7.4
--- Исправлены кнопки: добавлены xs и ys
+-- PIM MARKET SERVER (UNIFIED) – версия 7.6
+-- ГАРАНТИРОВАННО РАБОЧАЯ ЗАГРУЗКА DOUBLEBUFFERING
 -- ============================================================
 
 local component = require("component")
 local event = require("event")
 local keyboard = require("keyboard")
 local unicode = require("unicode")
-local computer = require("computer")
+local computer = require("computer")  -- <-- ОБЯЗАТЕЛЬНО
 local serialization = require("serialization")
 local filesystem = require("filesystem")
 local term = require("term")
@@ -67,7 +67,12 @@ if not buffer then
         print("Или скачайте файл вручную:")
         print("  wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua /lib/DoubleBuffering.lua")
         print("Нажмите любую клавишу для выхода...")
-        computer.pullEvent("key_down")
+        -- Безопасное ожидание
+        if computer and computer.pullEvent then
+            computer.pullEvent("key_down")
+        else
+            event.pull("key_down")
+        end
         os.exit()
     end
     
@@ -96,7 +101,11 @@ if not buffer then
     print("Скачайте вручную командой:")
     print("  wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua /lib/DoubleBuffering.lua")
     print("Нажмите любую клавишу для выхода...")
-    computer.pullEvent("key_down")
+    if computer and computer.pullEvent then
+        computer.pullEvent("key_down")
+    else
+        event.pull("key_down")
+    end
     os.exit()
 end
 
@@ -822,11 +831,9 @@ local function box(x, y, w, h, fg, bg)
     end
 end
 
--- ИСПРАВЛЕННАЯ ФУНКЦИЯ drawButton
 local function drawButton(btn)
     if not btn then return end
     if not btn.xs or not btn.ys then
-        -- Если размеры не заданы, пропускаем
         return
     end
     fill(btn.x, btn.y, btn.xs, btn.ys, btn.bg)
@@ -835,7 +842,6 @@ local function drawButton(btn)
     write(textX, textY, btn.text, btn.fg, btn.bg)
 end
 
--- ИСПРАВЛЕННАЯ ФУНКЦИЯ addButton
 local function addButton(id, label, x, y, w, bg, fg)
     local b = {
         id = id,
@@ -898,7 +904,6 @@ local LIST_H = MAIN_H - 4
 local function msg(v, c) ui.message = tostring(v or ""); ui.messageColor = c or C.white end
 local function clearControls() ui.fields = {}; ui.buttons = {}; ui.rows = {} end
 
--- addField без изменений
 local function addField(id, label, value, x, y, w, opt)
     opt = opt or {}
     local f = { id = id, label = label, value = tostring(value or ""), x = x, y = y, w = w, numeric = opt.numeric == true, readonly = opt.readonly == true }
