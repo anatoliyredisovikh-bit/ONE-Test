@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – версия 7.3
--- ГАРАНТИРОВАННАЯ ЗАГРУЗКА DOUBLEBUFFERING
+-- PIM MARKET SERVER (UNIFIED) – версия 7.4
+-- БЕЗ DOUBLEBUFFERING – оптимизированная перерисовка
 -- ============================================================
 
 local component = require("component")
@@ -19,130 +19,6 @@ if not component.isAvailable("gpu") then error("Не найдена видеок
 
 local modem = component.modem
 local gpu = component.gpu
-
--- ------------------------------------------------------------------
--- 0. ГАРАНТИРОВАННАЯ ЗАГРУЗКА DOUBLEBUFFERING
--- ------------------------------------------------------------------
-local buffer = nil
-
--- Пытаемся загрузить через require
-local ok, mod = pcall(require, "DoubleBuffering")
-if ok and mod then buffer = mod end
-if not buffer then
-    ok, mod = pcall(require, "doubleBuffering")
-    if ok and mod then buffer = mod end
-end
-
--- Если не загрузилось – пробуем через dofile
-if not buffer then
-    local paths = {
-        "/lib/DoubleBuffering.lua",
-        "/lib/doubleBuffering.lua",
-        "/usr/lib/DoubleBuffering.lua",
-        "/usr/lib/doubleBuffering.lua",
-        "/home/DoubleBuffering.lua",
-        "/home/doubleBuffering.lua"
-    }
-    for _, p in ipairs(paths) do
-        if filesystem.exists(p) then
-            local ok, mod = pcall(dofile, p)
-            if ok and mod then
-                buffer = mod
-                break
-            end
-        end
-    end
-end
-
--- Если всё ещё нет – пытаемся скачать и загрузить
-if not buffer then
-    print("⚠️ DoubleBuffering не найдена. Пытаюсь установить...")
-    
-    -- Проверяем наличие wget и интернета
-    local has_wget = pcall(os.execute, "which wget")
-    local internet_ok = component.isAvailable("internet")
-    
-    if not has_wget and not internet_ok then
-        print("❌ Нет wget и интернета. Установите вручную:")
-        print("   pastebin run vTM8nbSZ")
-        print("Нажмите любую клавишу для выхода...")
-        computer.pullEvent("key_down")
-        os.exit()
-    end
-    
-    -- Список зависимостей
-    local deps = {
-        { name = "DoubleBuffering", url = "http://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua" },
-        { name = "advancedLua",     url = "http://raw.githubusercontent.com/IgorTimofeev/AdvancedLua/master/AdvancedLua.lua" },
-        { name = "color",           url = "http://raw.githubusercontent.com/IgorTimofeev/Color/master/Color.lua" },
-        { name = "image",           url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/Image.lua" },
-        { name = "OCIF",            url = "http://raw.githubusercontent.com/IgorTimofeev/Image/master/OCIF.lua" },
-    }
-    
-    if not filesystem.exists("/lib") then
-        filesystem.makeDirectory("/lib")
-    end
-    
-    for _, dep in ipairs(deps) do
-        local path = "/lib/" .. dep.name .. ".lua"
-        if not filesystem.exists(path) then
-            print("⬇️ Загрузка " .. dep.name .. " ...")
-            local command = "wget -f " .. dep.url .. " " .. path
-            local result = os.execute(command)
-            if result and filesystem.exists(path) then
-                print("✅ " .. dep.name .. " сохранён")
-            else
-                print("❌ Не удалось загрузить " .. dep.name)
-            end
-        end
-    end
-    
-    -- После скачивания пробуем загрузить через dofile
-    local dbPath = "/lib/DoubleBuffering.lua"
-    if filesystem.exists(dbPath) then
-        local ok, mod = pcall(dofile, dbPath)
-        if ok and mod then
-            buffer = mod
-            print("✅ DoubleBuffering загружена через dofile")
-        else
-            -- Пробуем через require ещё раз (возможно, теперь работает)
-            ok, mod = pcall(require, "DoubleBuffering")
-            if ok and mod then buffer = mod end
-            if not buffer then
-                ok, mod = pcall(require, "doubleBuffering")
-                if ok and mod then buffer = mod end
-            end
-        end
-    end
-end
-
--- Если всё равно nil – выходим
-if not buffer then
-    print("❌ Не удалось загрузить DoubleBuffering.")
-    print("Проверьте, что файл /lib/DoubleBuffering.lua существует и корректен.")
-    print("Можно попробовать скачать вручную командой:")
-    print("  wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua /lib/DoubleBuffering.lua")
-    print("Нажмите любую клавишу для выхода...")
-    computer.pullEvent("key_down")
-    os.exit()
-end
-
--- Проверяем, что буфер содержит нужные методы
-if not buffer.bindGPU or not buffer.drawChanges then
-    print("❌ Загруженный модуль DoubleBuffering не содержит необходимых методов.")
-    print("Возможно, файл повреждён. Попробуйте переустановить.")
-    print("Нажмите любую клавишу для выхода...")
-    computer.pullEvent("key_down")
-    os.exit()
-end
-
-print("✅ DoubleBuffering успешно загружена!")
-
--- Подключаем остальные зависимости (если они нужны)
-pcall(require, "advancedLua")
-pcall(require, "color")
-pcall(require, "image")
-pcall(require, "OCIF")
 
 -- ------------------------------------------------------------------
 -- 1. КОНФИГУРАЦИЯ
@@ -215,6 +91,9 @@ local owner = nil
 local markets = {}
 local shopPaused = false
 
+-- Флаг для перерисовки
+local needsRedraw = true
+
 -- ------------------------------------------------------------------
 -- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ
 -- ------------------------------------------------------------------
@@ -281,6 +160,7 @@ local function saveCatalog()
     file:write(serialization.serialize({ buyCatalog = buyCatalog, sellCatalog = sellCatalog }))
     file:close()
     broadcastSellCatalog()
+    needsRedraw = true
 end
 
 local function registerTerminal(address, id)
@@ -800,11 +680,6 @@ if maxW and maxH and (WIDTH < maxW or HEIGHT < maxH) then
     WIDTH, HEIGHT = gpu.getResolution()
 end
 
--- Привязываем буфер
-buffer.bindGPU(gpu)
-buffer.setResolution(WIDTH, HEIGHT)
-buffer.setBackground(0x0C0C0C)
-
 local C = {
     bg = 0x0C0C0C, panel = 0x11191D, header = 0x0A0A0A, line = 0x27BDEC,
     accent = 0x0C9A76, white = 0xFFFFFF, gray = 0xAAAAAA, dark = 0x555555,
@@ -830,11 +705,12 @@ local tabDescriptions = {
 }
 
 -- ------------------------------------------------------------------
--- 10.2 БУФЕРИЗИРОВАННЫЕ ФУНКЦИИ РИСОВАНИЯ
+-- 10.2 ФУНКЦИИ РИСОВАНИЯ
 -- ------------------------------------------------------------------
 local function fill(x, y, w, h, bg, ch)
     if w <= 0 or h <= 0 then return end
-    buffer.drawRectangle(x, y, w, h, bg or C.bg, bg or C.bg, ch or " ")
+    gpu.setBackground(bg or C.bg)
+    gpu.fill(x, y, w, h, ch or " ")
 end
 
 local function write(x, y, v, fg, bg)
@@ -842,7 +718,9 @@ local function write(x, y, v, fg, bg)
     v = tostring(v or "")
     if x < 1 then v = usub(v, 2 - x); x = 1 end
     if v == "" then return end
-    buffer.text(x, y, fg or C.white, bg or C.bg, trunc(v, WIDTH - x + 1))
+    gpu.setForeground(fg or C.white)
+    gpu.setBackground(bg or C.bg)
+    gpu.set(x, y, trunc(v, WIDTH - x + 1))
 end
 
 local function centerX(v, left, w)
@@ -946,6 +824,7 @@ end
 local function setCatalog(tab, catalog)
     if tab == "buy" then buyCatalog = catalog else sellCatalog = catalog end
     saveCatalog()
+    needsRedraw = true
 end
 
 local function listData()
@@ -1224,8 +1103,8 @@ local function drawBottom()
 end
 
 local function drawAll()
-    buffer.clear(1, 1, WIDTH, HEIGHT, C.bg)
     clearControls()
+    fill(1, 1, WIDTH, HEIGHT, C.bg)
     drawHeader()
     local list = listData()
     if #list == 0 then ui.selected = 0; ui.scroll = 0 elseif ui.selected <= 0 then ui.selected = 1 elseif ui.selected > #list then ui.selected = #list end
@@ -1234,12 +1113,13 @@ local function drawAll()
     drawRight(e)
     drawBottom()
     ui.lastDraw = computer.uptime()
-    buffer.drawChanges()
+    needsRedraw = false
 end
 
 local function reload()
     loadForm()
     ui.activeField = nil
+    needsRedraw = true
     drawAll()
 end
 
