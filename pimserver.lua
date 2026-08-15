@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.7
--- Добавлены информационные подсказки для вкладок
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.8
+-- Многострочные подсказки для вкладок + загрузка из репозитория
 -- ============================================================
 
 local component = require("component")
@@ -59,6 +59,22 @@ local function trunc(v, w)
     v = tostring(v or ""); w = math.max(1, tonumber(w) or 1)
     if ulen(v) <= w then return v end
     return w <= 1 and usub(v, 1, w) or usub(v, 1, w - 1) .. "…"
+end
+
+-- Функция разбивки текста на строки по ширине (с учётом unicode)
+local function wrapText(text, maxLen)
+    local lines = {}
+    local current = ""
+    for word in text:gmatch("%S+") do
+        if unicode.len(current .. " " .. word) <= maxLen then
+            if current == "" then current = word else current = current .. " " .. word end
+        else
+            table.insert(lines, current)
+            current = word
+        end
+    end
+    if current ~= "" then table.insert(lines, current) end
+    return lines
 end
 
 -- ------------------------------------------------------------------
@@ -886,7 +902,7 @@ local function catalogEditor()
     local x = RIGHT_X; local w = RIGHT_W
     local title = (ui.tab == "buy" and "РЕДАКТОР ПОКУПКИ" or "РЕДАКТОР ПРОДАЖИ")
     write(x, MAIN_Y + 1, trunc(title, w), C.accent, C.bg)
-    
+
     addField("displayName", "Название:", ui.form.displayName, x, MAIN_Y + 4, w - 2)
     addField("internalName", "ID предмета:", ui.form.internalName, x, MAIN_Y + 6, w - 2)
     addField("damage", "Damage:", ui.form.damage, x, MAIN_Y + 8, w - 2, { numeric = true })
@@ -894,15 +910,15 @@ local function catalogEditor()
     addField("priceEma", "EMA:", ui.form.priceEma, x, MAIN_Y + 12, w - 2, { numeric = true })
     addField("article", "Артикул:", ui.form.article, x, MAIN_Y + 14, w - 2)
     addField("maxQty", "Остаток:", ui.form.maxQty, x, MAIN_Y + 16, w - 2, { numeric = true })
-    
+
     write(x, MAIN_Y + 18, "Активен:", C.gray, C.bg)
     addButton("toggle_enabled", "[ " .. (ui.form.enabled and "ДА" or "НЕТ") .. " ]", x + 15, MAIN_Y + 18, 10, ui.form.enabled and C.button or C.danger)
-    
+
     local y = MAIN_Y + 21
     addButton("save_item", "[ СОХРАНИТЬ ]", x, y, 18, C.button)
     addButton("new_item", "[ НОВЫЙ ]", x + 20, y, 14, C.alt)
     addButton("delete_item", "[ УДАЛИТЬ ]", x + 36, y, 16, C.danger)
-    
+
     write(x, MAIN_Y + 24, trunc("Всего товаров: " .. #getCatalog(ui.tab), w), C.gray, C.bg)
 end
 
@@ -984,10 +1000,14 @@ local function drawRight(e)
         drawField(f, ui.activeField == i)
     end
 
-    -- Вывод описания внизу правой панели с обрезкой
+    -- Вывод описания внизу правой панели с переносом на несколько строк
     local desc = tabDescriptions[ui.tab]
     if desc then
-        write(x + 1, MAIN_Y + MAIN_H - 2, trunc(desc, RIGHT_W - 2), C.gray, C.bg)
+        local lines = wrapText(desc, RIGHT_W - 2)
+        local startY = MAIN_Y + MAIN_H - 2 - #lines + 1
+        for i, line in ipairs(lines) do
+            write(x + 1, startY + i - 1, line, C.gray, C.bg)
+        end
     end
 end
 
