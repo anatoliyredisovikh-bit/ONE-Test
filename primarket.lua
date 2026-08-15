@@ -1,7 +1,7 @@
 -- ============================================================
 -- VIPCLIENT – клиент для VIP-SHOP MODEM SERVER
--- На основе admin_shop.lua, с модемным протоколом
--- Версия 5.0 (полная, рабочая)
+-- Версия 5.1 (с фиксированным адресом сервера)
+-- Полный файл, готовый к запуску
 -- ============================================================
 
 local component = require("component")
@@ -21,15 +21,28 @@ local modem = component.modem
 local gpu = component.gpu
 
 -- ============================================================
---  МОДЕМНЫЙ ПРОТОКОЛ (совпадает с server.lua)
+--  АДРЕС СЕРВЕРА (фиксированный из старых файлов)
 -- ============================================================
+local SERVER_ADDRESS = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
+-- Можно переопределить через файл /home/server_address.dat
+if fs.exists("/home/server_address.dat") then
+    local file = io.open("/home/server_address.dat", "r")
+    if file then
+        local addr = file:read("*a")
+        file:close()
+        if addr and addr ~= "" then
+            SERVER_ADDRESS = addr:gsub("%s+", "")
+        end
+    end
+end
+
 local PROTOCOL = "VIPSHOP-MODEM-1"
 local NETWORK_KEY = "VIPSHOP_ZOZIDO_REALM9_SECRET_2026"
 local SERVER_PORT = 3410
 local CLIENT_PORT = 3411
 local CHUNK_SIZE = 6000
 
-local serverAddress = nil
+local serverAddress = SERVER_ADDRESS  -- используем фиксированный адрес
 local pendingRequests = {}
 
 local function writeDebugLog(msg)
@@ -42,31 +55,15 @@ local function writeDebugLog(msg)
     end)
 end
 
+-- Поиск сервера не требуется, адрес известен
 local function discoverServer()
-    modem.broadcast(SERVER_PORT, PROTOCOL, "discover", NETWORK_KEY, "client", CLIENT_PORT)
-    local timeout = 2
-    local start = computer.uptime()
-    while computer.uptime() - start < timeout do
-        local ev = { event.pull(0.1) }
-        if ev[1] == "modem_message" then
-            local _, _, port, protocol, kind, key, replyId, addr, srvPort, cliPort = table.unpack(ev)
-            if port == SERVER_PORT and protocol == PROTOCOL and kind == "discover_reply" and key == NETWORK_KEY then
-                serverAddress = addr
-                writeDebugLog("✅ Найден сервер: " .. tostring(addr))
-                return true
-            end
-        end
-    end
-    writeDebugLog("❌ Сервер не обнаружен")
-    return false
+    return true
 end
 
 local function sendRequest(action, payload, callback)
     if not serverAddress then
-        if not discoverServer() then
-            if callback then callback({status="error", message="Сервер не найден"}) end
-            return
-        end
+        if callback then callback({status="error", message="Адрес сервера не задан"}) end
+        return
     end
 
     local requestId = tostring(os.time()) .. tostring(math.random(1000, 9999))
@@ -97,7 +94,7 @@ local function sendRequest(action, payload, callback)
     pendingRequests[requestId].timer = timer
 
     modem.send(serverAddress, SERVER_PORT, PROTOCOL, "request", NETWORK_KEY, requestId, CLIENT_PORT, data)
-    writeDebugLog("📤 Запрос " .. action .. " (ID=" .. requestId .. ") отправлен")
+    writeDebugLog("📤 Запрос " .. action .. " (ID=" .. requestId .. ") отправлен на " .. serverAddress)
 end
 
 local function processChunk(requestId, chunk, total, index)
@@ -177,7 +174,7 @@ local function sendRequestSync(action, payload, timeout)
 end
 
 -- ============================================================
---  ОСНОВНЫЕ ФУНКЦИИ КЛИЕНТА (авторизация, каталоги, баланс)
+--  ОСНОВНЫЕ ФУНКЦИИ КЛИЕНТА
 -- ============================================================
 
 local currentPlayer = nil
@@ -190,15 +187,14 @@ local playerBanned = false
 local banReason = ""
 local shopPaused = false
 
--- Каталоги (загружаются с сервера)
-local buyCatalog = {}   -- товары для покупки
-local sellCatalog = {}  -- товары для продажи
-local currentCatalog = {} -- активный каталог
-local catalogMode = "buy"  -- "buy" или "sell"
+-- Каталоги
+local buyCatalog = {}
+local sellCatalog = {}
+local catalogMode = "buy"
 local buyVersion = 0
 local sellVersion = 0
 
--- Состояние UI (из admin_shop.lua)
+-- UI
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
 if WIDTH < maxW or HEIGHT < maxH then
@@ -262,9 +258,7 @@ local function sortableName(name)
     return result
 end
 
--- ============================================================
---  РАЗМЕТКА UI (из admin_shop.lua)
--- ============================================================
+-- Разметка UI
 local TOP_H = 3
 local BOT_H = 3
 local MAIN_Y = 4
@@ -299,14 +293,7 @@ local searchQuery = ""
 local searchFocused = false
 local qtyFocused = false
 
--- Переменные для работы с PIM и ME (будут инициализированы позже)
-local pimProxy = nil
-local meProxy = nil
-local selector = nil
-
--- ============================================================
---  ФУНКЦИИ ДЛЯ РАБОТЫ С PIM И ME
--- ============================================================
+-- PIM и ME функции
 local function getPimAddr()
     for addr in component.list("pim") do return addr end
     return nil
@@ -348,7 +335,6 @@ local function isPlayerOnPim()
     return getPlayerOnPim() ~= nil
 end
 
--- Сканирование инвентаря
 local function scanPlayerInventory(targetName, targetDamage)
     local pim = getPimProxy()
     if not pim then return 0 end
@@ -374,7 +360,6 @@ local function scanPlayerInventory(targetName, targetDamage)
     return total
 end
 
--- Извлечение предметов из инвентаря в ME (направление "down")
 local function extractToME(targetName, amount, targetDamage)
     local pim = getPimProxy()
     if not pim or amount <= 0 then return 0 end
@@ -407,7 +392,6 @@ local function extractToME(targetName, amount, targetDamage)
     return extracted
 end
 
--- Получение количества предмета в ME
 local function getMEQuantity(internalName, damage)
     local me = getMeAddr()
     if not me then return 0 end
@@ -423,9 +407,7 @@ local function getMEQuantity(internalName, damage)
     return total
 end
 
--- ============================================================
---  ЗАГРУЗКА КАТАЛОГА С СЕРВЕРА
--- ============================================================
+-- Загрузка каталога
 local function loadCatalog(mode, callback)
     local action = "get_catalog"
     local payload = { catalog = mode }
@@ -438,9 +420,7 @@ local function loadCatalog(mode, callback)
                 if catalogMode == "buy" then
                     allItems = buyCatalog
                     filterItems()
-                    if currentScreen == "shop" then
-                        redrawAll()
-                    end
+                    if currentScreen == "shop" then redrawAll() end
                 end
             else
                 sellCatalog = data.sellItems or {}
@@ -448,9 +428,7 @@ local function loadCatalog(mode, callback)
                 if catalogMode == "sell" then
                     allItems = sellCatalog
                     filterItems()
-                    if currentScreen == "shop" then
-                        redrawAll()
-                    end
+                    if currentScreen == "shop" then redrawAll() end
                 end
             end
             if callback then callback(true) end
@@ -460,7 +438,6 @@ local function loadCatalog(mode, callback)
     end)
 end
 
--- Открытие сессии (вход)
 local function openSession(playerName)
     local payload = { name = playerName }
     local response = sendRequestSync("session_open", payload, 5)
@@ -482,19 +459,14 @@ local function openSession(playerName)
     end
 end
 
--- ============================================================
---  ПОКУПКА / ПРОДАЖА (с транзакциями)
--- ============================================================
+-- Покупка/продажа
 local function performPurchase(item, qty)
     if not currentPlayer or qty <= 0 then return false, "Некорректные данные" end
     if playerBanned then return false, "Вы забанены" end
     if shopPaused then return false, "Магазин на паузе" end
 
-    -- Проверяем наличие в ME
     local stock = getMEQuantity(item.internalName, item.damage)
-    if stock < qty then
-        return false, "Недостаточно товара на складе (в ME)"
-    end
+    if stock < qty then return false, "Недостаточно товара на складе (в ME)" end
 
     local txid = "BUY-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
     local payload = {
@@ -510,15 +482,12 @@ local function performPurchase(item, qty)
     end
 
     local data = response.data
-    -- Списание уже выполнено на сервере, теперь выдаём предметы из ME
     local meAddr = getMeAddr()
     if not meAddr then
-        -- если нет ME, возвращаем средства через adjust
         sendRequestSync("adjust_purchase", { transactionId = txid, deliveredQty = 0 }, 3)
         return false, "ME-интерфейс не найден"
     end
 
-    -- Пытаемся выдать предметы (exportItem)
     local id = item.internalName
     if not id:find(":") then id = "minecraft:" .. id end
     local fingerprint = { id = id, dmg = tonumber(item.damage) or 0 }
@@ -548,7 +517,6 @@ local function performPurchase(item, qty)
     end
 
     if delivered < qty then
-        -- частичная выдача – корректируем
         local adjResponse = sendRequestSync("adjust_purchase", { transactionId = txid, deliveredQty = delivered }, 3)
         if adjResponse.status == "ok" then
             coinBalance = adjResponse.data.balanceCoin or coinBalance
@@ -559,11 +527,9 @@ local function performPurchase(item, qty)
             return false, "Ошибка корректировки: " .. (adjResponse.message or "неизвестно")
         end
     else
-        -- полная выдача
         coinBalance = data.balanceCoin or coinBalance
         emaBalance = data.balanceEma or emaBalance
         playerTransactions = data.transactions or playerTransactions
-        -- finalize (асинхронно)
         sendRequest("finalize_purchase", { transactionId = txid }, function() end)
         return true, "Успешно"
     end
@@ -574,17 +540,11 @@ local function performSell(item, qty)
     if playerBanned then return false, "Вы забанены" end
     if shopPaused then return false, "Магазин на паузе" end
 
-    -- Сканируем инвентарь
     local inventoryQty = scanPlayerInventory(item.internalName, item.damage)
-    if inventoryQty < qty then
-        return false, "Недостаточно предметов в инвентаре"
-    end
+    if inventoryQty < qty then return false, "Недостаточно предметов в инвентаре" end
 
-    -- Извлекаем предметы в ME
     local extracted = extractToME(item.internalName, qty, item.damage)
-    if extracted == 0 then
-        return false, "Не удалось изъять предметы"
-    end
+    if extracted == 0 then return false, "Не удалось изъять предметы" end
 
     local txid = "SELL-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
     local payload = {
@@ -606,10 +566,7 @@ local function performSell(item, qty)
     end
 end
 
--- ============================================================
---  UI ФУНКЦИИ (из admin_shop.lua, но с динамическими данными)
--- ============================================================
-
+-- UI функции
 local function filterItems()
     items = {}
     if searchQuery == "" then
@@ -737,7 +694,6 @@ local function drawItemRow(index, y)
     local maxNameLen = COL_ME_X - COL_NAME_X - 2
     local displayName = truncate(item.displayName or item.name or "", maxNameLen - 2)
     text(COL_NAME_X + 2, y, displayName, nameColor, isSelected and C.selectedBg or C.bg)
-    -- В ME показываем количество из ME
     local meQty = getMEQuantity(item.internalName, item.damage)
     text(COL_ME_X, y, tostring(meQty), meColor, isSelected and C.selectedBg or C.bg)
     text(COL_COINA_X, y, trimNumber(item.priceCoin or 0, 2), coinaColor, isSelected and C.selectedBg or C.bg)
@@ -894,7 +850,7 @@ local function scroll(delta)
 end
 
 -- ============================================================
---  ОБРАБОТЧИКИ СОБЫТИЙ (мышь, клавиатура, модем)
+--  ОБРАБОТЧИКИ СОБЫТИЙ
 -- ============================================================
 
 local function handleClick(x, y)
@@ -933,7 +889,7 @@ local function handleClick(x, y)
         drawQuantitySection()
         return
     end
-    -- Кнопка покупки
+    -- Кнопка покупки/продажи
     if y == BTN_Y and x >= RIGHT_INNER_X and x < RIGHT_INNER_X + btnW then
         local item = items[selectedIndex]
         if not item then return
@@ -942,20 +898,23 @@ local function handleClick(x, y)
             text(RIGHT_INNER_X, BTN_Y+2, "Введите количество!", C.red, C.bg)
             return
         end
-        local ok, msg = performPurchase(item, qty)
+        local ok, msg
+        if catalogMode == "sell" then
+            ok, msg = performSell(item, qty)
+        else
+            ok, msg = performPurchase(item, qty)
+        end
         if ok then
-            text(RIGHT_INNER_X, BTN_Y+2, "Покупка успешна!", C.green, C.bg)
-            -- обновить остаток в ME и баланс
+            text(RIGHT_INNER_X, BTN_Y+2, "Операция успешна!", C.green, C.bg)
             redrawAll()
         else
             text(RIGHT_INNER_X, BTN_Y+2, "Ошибка: " .. msg, C.red, C.bg)
         end
         return
     end
-    -- Кнопка продажи (заменим её позже, сейчас она просто переключает режим)
+    -- Переключение режимов внизу
     if y == BOT_Y then
         if x >= buyX and x < buyX + btnW then
-            -- переключить на покупки
             catalogMode = "buy"
             allItems = buyCatalog
             filterItems()
@@ -998,7 +957,6 @@ local function handleLoginKey(char, code)
         local ok, err = openSession(loginName)
         if ok then
             currentScreen = "shop"
-            -- загружаем каталоги
             loadCatalog("buy", function()
                 loadCatalog("sell", function()
                     allItems = buyCatalog
@@ -1025,12 +983,9 @@ end
 gpu.setResolution(80, 25)
 gpu.setBackground(C.bg)
 
--- Поиск сервера
 if not serverAddress then
-    if not discoverServer() then
-        print("Не удалось найти сервер")
-        return
-    end
+    print("Ошибка: адрес сервера не задан")
+    return
 end
 
 currentScreen = "login"
