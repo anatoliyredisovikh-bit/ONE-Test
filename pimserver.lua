@@ -1,1399 +1,276 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – оптимизированная версия 7.0
--- Исправления: индексы, чанкинг, буферизация, очистка сессий, диспетчеризация
+-- VIP-SHOP MODEM SERVER
+-- Центральный сервер экономики + админ-панель.
+-- Автоматически загружает начальный каталог из buy_items.lua
 -- ============================================================
 
-local component = require("component")
-local event = require("event")
-local keyboard = require("keyboard")
-local unicode = require("unicode")
-local computer = require("computer")
-local serialization = require("serialization")
-local filesystem = require("filesystem")
-local term = require("term")
-local math = require("math")
-local os = require("os")
+local component=require("component")
+local event=require("event")
+local keyboard=require("keyboard")
+local unicode=require("unicode")
+local computer=require("computer")
+local serialization=require("serialization")
+local filesystem=require("filesystem")
+local term=require("term")
 
-if not component.isAvailable("modem") then error("Не найден модем", 0) end
-if not component.isAvailable("gpu") then error("Не найдена видеокарта", 0) end
+if not component.isAvailable("modem") then error("Не найден модем",0) end
+if not component.isAvailable("gpu") then error("Не найдена видеокарта",0) end
 
-local modem = component.modem
-local gpu = component.gpu
+local modem=component.modem
+local gpu=component.gpu
 
--- 1. КОНФИГУРАЦИЯ
-local ACCESS_PASSWORD = "admin"
-local ADMIN_NAME = "Kalleront"
-local SESSION_TIMEOUT = 31536000
-local TIMEZONE_OFFSET = 3 * 3600
+-- Эти значения должны совпадать с клиентом.
+local PROTOCOL="VIPSHOP-MODEM-1"
+local NETWORK_KEY="VIPSHOP_ZOZIDO_REALM9_SECRET_2026"
+local SERVER_PORT=3410
+local CLIENT_PORT=3411
+local CHUNK_SIZE=6000
+local OFFLINE_AFTER=45
 
-local DB_PATH = "/home/players.db"
-local STATS_PATH = "/home/global_stats.db"
-local FEEDBACKS_PATH = "/home/feedbacks.db"
-local REPORTS_LOG = "/home/reports.log"
-local CATALOG_PATH = "/home/catalog.db"
-local SHOP_ITEMS_FILE = "/home/shop_items.lua"
-local REMOTE_SHOP_ITEMS_URL = "https://raw.githubusercontent.com/anatoliyredisovikh-bit/ONE-Test/refs/heads/main/shop_items.lua"
+local DATA_DIR="/home/vipshop_data"
+local STATE_FILE=DATA_DIR.."/state.db"
+local BACKUP_FILE=DATA_DIR.."/state.backup.db"
+local MAX_TRANSACTIONS=10000
+local MAX_OPERATIONS=20000
 
--- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-local tmpfs = component.proxy(computer.tmpAddress())
-local function getRealTimestamp()
-    local handle = tmpfs.open("/time", "w")
-    tmpfs.write(handle, "time")
-    tmpfs.close(handle)
-    return tmpfs.lastModified("/time") / 1000 + TIMEZONE_OFFSET
-end
-local function getRealTimeString() return os.date("%H:%M:%S", getRealTimestamp()) end
-local function getRealDateTimeString() return os.date("%d.%m.%Y %H:%M:%S", getRealTimestamp()) end
-local function stamp() return getRealDateTimeString() end
-local function num(v, d) local n = tonumber(v); return n ~= nil and n or (d or 0) end
-local function trim(v) local s = string.format("%.4f", num(v, 0)):gsub("0+$", ""):gsub("%.$", ""); return s == "" and "0" or s end
-local function clone(v) if type(v) ~= "table" then return v end; local r = {}; for k, n in pairs(v) do r[k] = clone(n) end; return r end
-local function tableSize(t) local c = 0; for _ in pairs(t) do c = c + 1 end; return c end
-local function ulen(v) return unicode.len(tostring(v or "")) end
-local function usub(v, a, b) return unicode.sub(tostring(v or ""), a, b) end
-local function trunc(v, w)
-    v = tostring(v or ""); w = math.max(1, tonumber(w) or 1)
-    if ulen(v) <= w then return v end
-    return w <= 1 and usub(v, 1, w) or usub(v, 1, w - 1) .. "…"
-end
-local function wrapText(text, maxLen)
-    local lines = {}
-    local current = ""
-    for word in text:gmatch("%S+") do
-        if unicode.len(current .. " " .. word) <= maxLen then
-            if current == "" then current = word else current = current .. " " .. word end
-        else
-            table.insert(lines, current)
-            current = word
-        end
-    end
-    if current ~= "" then table.insert(lines, current) end
-    return lines
-end
+modem.open(SERVER_PORT)
 
--- 3. ГЛОБАЛЬНЫЕ ТАБЛИЦЫ
-local players = {}
-local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
-local feedbacks = {}
-local buyCatalog = {}
-local sellCatalog = {}
-local terminals = {}
-local sessions = {}
-local owner = nil
-local markets = {}
-local shopPaused = false
-local needsRedraw = false
+local WIDTH,HEIGHT=gpu.getResolution()
+local maxW,maxH=gpu.maxResolution()
+if maxW and maxH and (WIDTH<maxW or HEIGHT<maxH) then gpu.setResolution(maxW,maxH) WIDTH,HEIGHT=gpu.getResolution() end
 
--- ★ НОВОЕ: индексы для быстрого поиска
-local sellIndex = {}
-local buyIndex = {}
+local C={bg=0x0C0C0C,panel=0x11191D,header=0x0A0A0A,line=0x27BDEC,accent=0x0C9A76,white=0xFFFFFF,gray=0xAAAAAA,dark=0x555555,green=0x55FF55,yellow=0xFFAA00,red=0xFF5555,cyan=0x55FFFF,selected=0x002440,input=0x1A1A1A,button=0x0A502D,alt=0x1A5A6B,danger=0x8B1A1A,pause=0x8A5A00}
 
--- ★ НОВОЕ: буфер для отложенного сохранения
-local saveBuffer = { players = false, stats = false, feedbacks = false, catalog = false }
-local saveTimer = nil
+local function ulen(v)return unicode.len(tostring(v or ""))end
+local function usub(v,a,b)return unicode.sub(tostring(v or ""),a,b)end
+local function trunc(v,w)v=tostring(v or "") w=math.max(1,tonumber(w)or 1) if ulen(v)<=w then return v end return w<=1 and usub(v,1,w) or usub(v,1,w-1).."…" end
+local function fill(x,y,w,h,bg,ch)if w<=0 or h<=0 then return end gpu.setBackground(bg or C.bg) gpu.fill(x,y,w,h,ch or " ")end
+local function write(x,y,v,fg,bg)if y<1 or y>HEIGHT or x>WIDTH then return end v=tostring(v or "") if x<1 then v=usub(v,2-x)x=1 end if v=="" then return end gpu.setForeground(fg or C.white)gpu.setBackground(bg or C.bg)gpu.set(x,y,trunc(v,WIDTH-x+1))end
+local function centerX(v,left,w)left=left or 1 w=w or WIDTH return left+math.max(0,math.floor((w-ulen(v))/2))end
+local function center(y,v,fg,bg,left,w)write(centerX(v,left,w),y,v,fg,bg)end
+local function box(x,y,w,h,fg,bg)if w<2 or h<2 then return end fg=fg or C.line bg=bg or C.bg write(x,y,"┌"..string.rep("─",w-2).."┐",fg,bg)for r=y+1,y+h-2 do write(x,r,"│",fg,bg)write(x+w-1,r,"│",fg,bg)end write(x,y+h-1,"└"..string.rep("─",w-2).."┘",fg,bg)end
+local function num(v,d)local n=tonumber(v)if n==nil then return d or 0 end return n end
+local function trim(v)local s=string.format("%.4f",num(v,0)):gsub("0+$",""):gsub("%.$","")return s=="" and "0" or s end
+local function stamp()return os and os.date and os.date("%d.%m.%Y %H:%M:%S")or tostring(math.floor(computer.uptime()))end
+local function clone(v)if type(v)~="table" then return v end local r={}for k,n in pairs(v)do r[k]=clone(n)end return r end
 
--- ★ НОВОЕ: таймер очистки сессий
-local sessionCleanupTimer = nil
+if not filesystem.exists(DATA_DIR)then filesystem.makeDirectory(DATA_DIR)end
+local function readTable(path)if not filesystem.exists(path)then return nil end local f=io.open(path,"r")if not f then return nil end local raw=f:read("*a")f:close()local ok,v=pcall(serialization.unserialize,raw or "")if ok and type(v)=="table"then return v end return nil end
+local function atomicSave(path,value)local raw=serialization.serialize(value)local tmp=path..".tmp"local f=io.open(tmp,"w")if not f then return false,"Не открыть временный файл"end f:write(raw)f:close()if filesystem.exists(path)then pcall(filesystem.remove,BACKUP_FILE)pcall(filesystem.rename,path,BACKUP_FILE)end local ok=pcall(filesystem.rename,tmp,path)if ok and filesystem.exists(path)then return true end local out=io.open(path,"w")if not out then return false,"Не сохранить state.db"end out:write(raw)out:close()pcall(filesystem.remove,tmp)return true end
 
--- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ
-local function logEvent(msg)
-    local line = "[" .. getRealDateTimeString() .. "] " .. msg
-    print(line)
-end
-
--- 5. ФУНКЦИИ СОХРАНЕНИЯ (с буферизацией и резервными копиями)
-local function saveToFile(path, data, makeBackup)
-    if makeBackup and filesystem.exists(path) then
-        filesystem.copy(path, path .. ".bak")
-    end
-    local file = io.open(path, "w")
-    if not file then return false end
-    file:write(serialization.serialize(data))
-    file:close()
-    return true
-end
-
-local function savePlayers()
-    if not saveBuffer.players then
-        saveBuffer.players = true
-        scheduleSave()
-    end
-end
-
-local function saveGlobalStats()
-    if not saveBuffer.stats then
-        saveBuffer.stats = true
-        scheduleSave()
-    end
-end
-
-local function saveFeedbacks()
-    if not saveBuffer.feedbacks then
-        saveBuffer.feedbacks = true
-        scheduleSave()
-    end
-end
-
-local function saveCatalog()
-    if not saveBuffer.catalog then
-        saveBuffer.catalog = true
-        scheduleSave()
-    end
-end
-
-local function scheduleSave()
-    if saveTimer then event.cancel(saveTimer) end
-    saveTimer = event.timer(3, function()
-        saveTimer = nil
-        flushSaves()
-    end)
-end
-
-local function flushSaves()
-    if saveBuffer.players then
-        if saveToFile(DB_PATH, players, true) then
-            saveBuffer.players = false
-        end
-    end
-    if saveBuffer.stats then
-        if saveToFile(STATS_PATH, globalStats, true) then
-            saveBuffer.stats = false
-        end
-    end
-    if saveBuffer.feedbacks then
-        if saveToFile(FEEDBACKS_PATH, feedbacks, true) then
-            saveBuffer.feedbacks = false
-        end
-    end
-    if saveBuffer.catalog then
-        local data = { buyCatalog = buyCatalog, sellCatalog = sellCatalog }
-        if saveToFile(CATALOG_PATH, data, true) then
-            saveBuffer.catalog = false
-            broadcastSellCatalog()  -- рассылка после сохранения
-        end
-    end
-end
-
--- 6. ИНДЕКСЫ ДЛЯ КАТАЛОГА
-local function rebuildSellIndex()
-    sellIndex = {}
-    for _, item in ipairs(sellCatalog) do
-        local key = item.internalName .. ":" .. tostring(item.damage or 0)
-        sellIndex[key] = item
-    end
-end
-
-local function rebuildBuyIndex()
-    buyIndex = {}
-    for _, item in ipairs(buyCatalog) do
-        local key = item.internalName .. ":" .. tostring(item.damage or 0)
-        buyIndex[key] = item
-    end
-end
-
-local function rebuildIndexes()
-    rebuildSellIndex()
-    rebuildBuyIndex()
-end
-
--- Вызывать после изменений каталога
-local function updateCatalogAndIndex(newSell, newBuy)
-    if newSell then
-        sellCatalog = newSell
-        rebuildSellIndex()
-    end
-    if newBuy then
-        buyCatalog = newBuy
-        rebuildBuyIndex()
-    end
-    saveCatalog()
-end
-
--- 7. ОТПРАВКА КАТАЛОГА ЧАНКАМИ
-local function sendCatalogChunks(address, catalog, catalogType, chunkSize)
-    chunkSize = chunkSize or 25
-    local total = #catalog
-    if total == 0 then
-        modem.send(address, 0xffef, serialization.serialize({
-            op = "catalog_chunk",
-            catalog = catalogType,
-            chunk = {},
-            total = 0,
-            index = 1,
-            finished = true
-        }))
-        return
-    end
-    for i = 1, total, chunkSize do
-        local chunk = {}
-        for j = i, math.min(i + chunkSize - 1, total) do
-            table.insert(chunk, catalog[j])
-        end
-        local finished = (i + chunkSize - 1 >= total)
-        modem.send(address, 0xffef, serialization.serialize({
-            op = "catalog_chunk",
-            catalog = catalogType,
-            chunk = chunk,
-            total = total,
-            index = i,
-            finished = finished
-        }))
-        os.sleep(0.05)
-    end
-end
-
-local function directPush(address, action, data)
-    if address and address ~= "" then
-        local msg = serialization.serialize({op="push", action=action, data=data})
-        modem.send(address, 0xffef, msg)
-        modem.send(address, 0xfffe, msg)
-        logEvent("Push отправлен на " .. address)
-    end
-end
-
-local function broadcast(action, data)
-    local msg = serialization.serialize({op="push", action=action, data=data})
-    modem.broadcast(0xffef, msg)
-    modem.broadcast(0xfffe, msg)
-end
-
-local function broadcastSellCatalog()
-    for address, _ in pairs(terminals) do
-        sendCatalogChunks(address, sellCatalog, "sell")
-    end
-    broadcast("catalog_update", { catalog = "sell", total = #sellCatalog })
-    logEvent("Каталог скупки разослан чанками")
-end
-
--- 8. ЗАГРУЗКА ДАННЫХ (с проверкой)
-local function loadData(path, default)
-    if not filesystem.exists(path) then return default or {} end
-    local file = io.open(path, "r")
-    if not file then return default or {} end
-    local raw = file:read("*a")
-    file:close()
-    if not raw or #raw == 0 then return default or {} end
-    local ok, data = pcall(serialization.unserialize, raw)
-    if ok and type(data) == "table" then
-        return data
-    else
-        logEvent("Ошибка загрузки " .. path .. ", используется значение по умолчанию")
-        return default or {}
-    end
-end
-
-players = loadData(DB_PATH, {})
-globalStats = loadData(STATS_PATH, { totalReports = 0, totalBuys = 0, totalSells = 0 })
-feedbacks = loadData(FEEDBACKS_PATH, {})
-local catalogData = loadData(CATALOG_PATH, { buyCatalog = {}, sellCatalog = {} })
-buyCatalog = catalogData.buyCatalog or {}
-sellCatalog = catalogData.sellCatalog or {}
-rebuildIndexes()
-
--- 8.1 ИМПОРТ ИЗ ЛОКАЛЬНОГО ФАЙЛА
-local function importSellItemsFromFile()
-    if not filesystem.exists(SHOP_ITEMS_FILE) then return false end
-    local ok, chunk = pcall(loadfile, SHOP_ITEMS_FILE)
-    if not ok or type(chunk) ~= "function" then
-        print("Ошибка загрузки " .. SHOP_ITEMS_FILE)
+-- ★ НОВОЕ: функция загрузки каталога из buy_items.lua
+local function loadBuyItemsFromFile()
+    local path = "/home/buy_items.lua"
+    if not filesystem.exists(path) then return false end
+    local ok, data = pcall(dofile, path)
+    if not ok or type(data) ~= "table" then
+        print("Ошибка загрузки buy_items.lua: " .. tostring(data))
         return false
     end
-    local ok2, data = pcall(chunk)
-    if not ok2 or type(data) ~= "table" or type(data.sellItems) ~= "table" then
-        print("Неверный формат " .. SHOP_ITEMS_FILE)
-        return false
-    end
+    -- Ожидаем, что файл возвращает массив с полями internalName, displayName, price_coin, price_ema, damage
     local newCatalog = {}
-    for _, item in ipairs(data.sellItems) do
-        table.insert(newCatalog, {
-            displayName = item.displayName or "",
-            internalName = item.internalName or "",
-            damage = item.damage or 0,
-            priceCoin = item.price or 0,
-            priceEma = 0,
-            article = tostring(item.internalName):sub(1, 10),
-            enabled = true,
-            maxQty = item.qty or 0,
-        })
-    end
-    sellCatalog = newCatalog
-    rebuildSellIndex()
-    saveCatalog()
-    print("Импортирован каталог скупки из " .. SHOP_ITEMS_FILE .. ", позиций: " .. #sellCatalog)
-    return true
-end
-
--- 8.2 ЗАГРУЗКА ИЗ УДАЛЁННОГО РЕПОЗИТОРИЯ
-local function loadRemoteSellItems()
-    if not component.isAvailable("internet") then
-        logEvent("⚠️ Интернет-карта не установлена")
-        return false
-    end
-    local internet = require("internet")
-    local ok, response = pcall(function()
-        return internet.request(REMOTE_SHOP_ITEMS_URL, nil, { ["Connection"] = "close", ["Timeout"] = 5 })
-    end)
-    if not ok or not response then
-        logEvent("❌ Не удалось подключиться к удалённому файлу")
-        return false
-    end
-    local content = ""
-    for chunk in response do content = content .. chunk end
-    local tmpFile = "/tmp/remote_shop_items.lua"
-    local f = io.open(tmpFile, "w")
-    if not f then return false end
-    f:write(content)
-    f:close()
-    local ok, data = pcall(dofile, tmpFile)
-    if not ok or type(data) ~= "table" or type(data.sellItems) ~= "table" then
-        logEvent("❌ Неверный формат удалённого файла")
-        pcall(filesystem.remove, tmpFile)
-        return false
-    end
-    local newCatalog = {}
-    for _, item in ipairs(data.sellItems) do
-        table.insert(newCatalog, {
-            displayName = item.displayName or "",
-            internalName = item.internalName or "",
-            damage = item.damage or 0,
-            priceCoin = item.price or 0,
-            priceEma = 0,
-            article = tostring(item.internalName):sub(1, 10),
-            enabled = true,
-            maxQty = item.qty or 0,
-        })
-    end
-    sellCatalog = newCatalog
-    rebuildSellIndex()
-    saveCatalog()
-    logEvent("✅ Загружен каталог скупки из удалённого файла, позиций: " .. #sellCatalog)
-    pcall(filesystem.remove, tmpFile)
-    return true
-end
-
--- 8.3 ИНИЦИАЛИЗАЦИЯ ЕСЛИ КАТАЛОГ ПУСТ
-if #sellCatalog == 0 then
-    if not importSellItemsFromFile() then
-        if not loadRemoteSellItems() then
-            sellCatalog = { { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true, maxQty = 0 } }
-            rebuildSellIndex()
-            saveCatalog()
+    for _, item in ipairs(data) do
+        if type(item) == "table" and item.internalName then
+            table.insert(newCatalog, {
+                displayName = tostring(item.displayName or item.internalName),
+                internalName = tostring(item.internalName),
+                damage = math.floor(num(item.damage, 0)),
+                priceCoin = num(item.price_coin or item.price, 0),
+                priceEma = num(item.price_ema or 0, 0),
+                article = tostring(item.article or ""),
+                enabled = true,
+                maxQty = math.floor(num(item.maxQty or item.qty, 0))
+            })
         end
     end
-end
-if #buyCatalog == 0 then
-    buyCatalog = { { displayName = "Алмаз", internalName = "minecraft:diamond", damage = 0, priceCoin = 10, priceEma = 0, article = "#VIP-001", enabled = true, maxQty = 0 } }
-    rebuildBuyIndex()
-    saveCatalog()
+    if #newCatalog == 0 then return false end
+    return newCatalog
 end
 
--- 9. СЕССИИ И ПОЛЬЗОВАТЕЛИ
-local function getOrCreatePlayer(name)
-    name = tostring(name)
-    if not players[name] then
-        players[name] = {
-            balance = 0.0,
-            transactions = 0,
-            regDate = stamp(),
-            agreed = false,
-            banned = false,
-            hasFeedback = false
-        }
-        savePlayers()
-    end
-    return players[name]
-end
-
-local function validateSession(name, token)
-    local s = sessions[name]
-    return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
-end
-
--- 10. ОЧИСТКА СТАРЫХ СЕССИЙ
-local function cleanupSessions()
-    local now = os.time()
-    for name, s in pairs(sessions) do
-        if now - (s.lastAction or 0) > SESSION_TIMEOUT then
-            sessions[name] = nil
-        end
-    end
-end
-sessionCleanupTimer = event.timer(300, cleanupSessions, math.huge)
-
--- 11. РЕГИСТРАЦИЯ ТЕРМИНАЛА
-local function registerTerminal(address, id)
-    if not terminals[address] then
-        terminals[address] = { address = address, id = id or "TERM-"..tostring(address):sub(1,8), lastSeen = computer.uptime() }
-        logEvent("Терминал зарегистрирован: " .. address)
-    else
-        terminals[address].lastSeen = computer.uptime()
-    end
-    sendCatalogChunks(address, sellCatalog, "sell")
-end
-
--- 12. ОБРАБОТКА МОДЕМНЫХ СООБЩЕНИЙ (ДИСПЕТЧЕР)
-modem.open(0xffef)
-modem.open(0xfffe)
-
-local function isAdmin(from) return from == owner end
-
-local commandHandlers = {}
-
-commandHandlers.register = function(from, port, msg)
-    if msg.password ~= ACCESS_PASSWORD then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный пароль"}))
-        logEvent("Попытка подключения с неверным паролем от " .. from)
-        return
-    end
-    if not owner then owner = from end
-    if not markets[from] then markets[from] = true end
-    registerTerminal(from, msg.terminalId)
-    modem.send(from, 0xffef, serialization.serialize({op="welcome", owner=(from==owner), shopPaused=shopPaused}))
-    logEvent("Терминал зарегистрирован: " .. from)
-end
-
-commandHandlers.enter = function(from, port, msg)
-    if shopPaused then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
-        return
-    end
-    local name = msg.name
-    if not name or name == "" then return end
-    local player = getOrCreatePlayer(name)
-    if player.banned then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Вы забанены"}))
-        return
-    end
-    local token
-    local s = sessions[name]
-    if s and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT then
-        token = s.token
-        s.lastAction = os.time()
-    else
-        token = tostring(math.floor(math.random() * 900000000 + 100000000))
-        sessions[name] = { token = token, lastAction = os.time() }
-    end
-    modem.send(from, 0xffef, serialization.serialize({
-        op = "welcome",
-        status = "ok",
-        token = token,
-        balance = player.balance,
-        transactions = player.transactions,
-        regDate = player.regDate,
-        agreed = player.agreed,
-        shopPaused = shopPaused
-    }))
-    logEvent(name .. " вошёл")
-end
-
-commandHandlers.getAccount = function(from, port, msg)
-    if not validateSession(msg.name, msg.token) then
-        modem.send(from, 0xffef, serialization.serialize({op="accountData", error=true, message="Токен устарел"}))
-        return
-    end
-    local player = players[msg.name]
-    if player then
-        sessions[msg.name].lastAction = os.time()
-        modem.send(from, 0xffef, serialization.serialize({
-            op = "accountData",
-            data = {
-                balance = player.balance,
-                transactions = player.transactions,
-                regDate = player.regDate,
-                agreed = player.agreed,
-                shopPaused = shopPaused
-            }
-        }))
-    end
-end
-
-commandHandlers.sell = function(from, port, msg)
-    if shopPaused then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
-        return
-    end
-    if not validateSession(msg.name, msg.token) then return end
-    local player = players[msg.name]
-    if not player or player.banned then return end
-    local value = tonumber(msg.value) or 0
-    local qtySold = tonumber(msg.qty) or 0
-    if qtySold > 0 then
-        local key = msg.internalName .. ":" .. tostring(msg.damage or 0)
-        local item = sellIndex[key]
-        if item then
-            local oldQty = item.maxQty or 0
-            item.maxQty = math.max(0, oldQty - qtySold)
-            logEvent(string.format("📉 Остаток товара '%s' уменьшен: %d -> %d", item.displayName, oldQty, item.maxQty))
-            saveCatalog()
-        end
-    end
-    player.balance = (player.balance or 0) + value
-    player.transactions = (player.transactions or 0) + 1
-    sessions[msg.name].lastAction = os.time()
-    globalStats.totalSells = (globalStats.totalSells or 0) + 1
-    savePlayers()
-    saveGlobalStats()
-    logEvent(string.format("💰 %s продал(а) предмет '%s' x%d за %.2f", msg.name, msg.item, qtySold, value))
-end
-
-commandHandlers.buy = function(from, port, msg)
-    if shopPaused then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
-        return
-    end
-    if not validateSession(msg.name, msg.token) then return end
-    local player = players[msg.name]
-    if not player or player.banned then return end
-    local value = tonumber(msg.value) or 0
-    player.balance = (player.balance or 0) - value
-    player.transactions = (player.transactions or 0) + 1
-    sessions[msg.name].lastAction = os.time()
-    globalStats.totalBuys = (globalStats.totalBuys or 0) + 1
-    savePlayers()
-    saveGlobalStats()
-    logEvent(string.format("🛒 %s купил(а) предмет '%s' x%d за %.2f", msg.name, msg.item, msg.qty or 0, value))
-end
-
-commandHandlers.report = function(from, port, msg)
-    if not validateSession(msg.name, msg.token) then return end
-    globalStats.totalReports = (globalStats.totalReports or 0) + 1
-    saveGlobalStats()
-    local file = io.open(REPORTS_LOG, "a")
-    if file then
-        file:write("[" .. msg.time .. "] " .. msg.name .. ": " .. msg.text .. "\n")
-        file:close()
-    end
-    logEvent("📩 Репорт от " .. msg.name .. ": " .. msg.text)
-end
-
-commandHandlers.agree = function(from, port, msg)
-    if not validateSession(msg.name, msg.token) then
-        modem.send(from, 0xffef, serialization.serialize({op="agree", error=true, message="Токен устарел"}))
-        return
-    end
-    local player = players[msg.name]
-    if player then
-        player.agreed = true
-        sessions[msg.name].lastAction = os.time()
-        savePlayers()
-        modem.send(from, 0xffef, serialization.serialize({op="agree", success=true, agreed=true}))
-        logEvent("📝 " .. msg.name .. " принял пользовательское соглашение")
-    else
-        modem.send(from, 0xffef, serialization.serialize({op="agree", error=true, message="Игрок не найден"}))
-    end
-end
-
-commandHandlers.get_feedbacks = function(from, port, msg)
-    if not validateSession(msg.name, msg.token) then
-        modem.send(from, 0xffef, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
-        return
-    end
-    local player = players[msg.name]
-    modem.send(from, 0xffef, serialization.serialize({
-        op = "feedbacks_list",
-        feedbacks = feedbacks,
-        hasFeedback = player and player.hasFeedback or false
-    }))
-end
-
-commandHandlers.add_feedback = function(from, port, msg)
-    if not validateSession(msg.name, msg.token) then
-        modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
-        return
-    end
-    local player = players[msg.name]
-    if not player then
-        modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Игрок не найден"}))
-        return
-    end
-    if player.hasFeedback then
-        modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Вы уже оставляли отзыв"}))
-        return
-    end
-    table.insert(feedbacks, 1, { name = msg.name, text = msg.text, time = msg.time })
-    player.hasFeedback = true
-    saveFeedbacks()
-    savePlayers()
-    modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=true}))
-    logEvent("📝 Новый отзыв от " .. msg.name .. ": " .. msg.text)
-end
-
-commandHandlers.request_catalog = function(from, port, msg)
-    sendCatalogChunks(from, sellCatalog, "sell")
-    logEvent("Клиент " .. from .. " запросил каталог (чанки)")
-end
-
-commandHandlers.sync_catalog = function(from, port, msg)
-    if not isAdmin(from) then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
-        return
-    end
-    broadcastSellCatalog()
-    modem.send(from, 0xffef, serialization.serialize({op="sync_catalog_response", success=true}))
-    logEvent("Принудительная синхронизация каталога по запросу от " .. from)
-end
-
-commandHandlers.add_catalog_item = function(from, port, msg)
-    if not isAdmin(from) then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
-        return
-    end
-    local catalogType = tostring(msg.catalog or "buy")
-    local item = {
-        displayName = tostring(msg.displayName or ""),
-        internalName = tostring(msg.internalName or ""),
-        damage = math.floor(num(msg.damage, 0)),
-        priceCoin = num(msg.priceCoin, 0),
-        priceEma = num(msg.priceEma, 0),
-        article = tostring(msg.article or ""),
-        enabled = msg.enabled ~= false,
-        maxQty = num(msg.maxQty, 0)
+local function defaultState()
+    local state = {
+        version=1,
+        maintenance=false,
+        buyVersion=1,
+        sellVersion=1,
+        nextTransaction=1,
+        buyCatalog={},
+        sellCatalog={},
+        users={},
+        transactions={},
+        operations={},
+        terminals={},
+        updatedAt=stamp()
     }
-    if item.displayName == "" or item.internalName == "" then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Название и ID обязательны"}))
-        return
-    end
-    if catalogType == "sell" then
-        table.insert(sellCatalog, item)
-        rebuildSellIndex()
+    -- ★ Загружаем каталог покупок из buy_items.lua, если он существует
+    local loaded = loadBuyItemsFromFile()
+    if loaded and #loaded > 0 then
+        state.buyCatalog = loaded
+        print("✅ Загружен каталог покупок из buy_items.lua, позиций: " .. #loaded)
     else
-        table.insert(buyCatalog, item)
-        rebuildBuyIndex()
+        -- Если файла нет или он пуст, создаём тестовый товар
+        state.buyCatalog = {
+            {displayName="Алмаз", internalName="minecraft:diamond", damage=0, priceCoin=10, priceEma=0, article="#VIP-001", enabled=true, maxQty=0},
+        }
+        print("⚠️ buy_items.lua не найден или пуст, создан тестовый каталог")
     end
-    saveCatalog()
-    logEvent("Админ добавил товар в каталог " .. catalogType .. ": " .. item.displayName)
-    modem.send(from, 0xffef, serialization.serialize({op="add_catalog_item_response", success=true, index=#(catalogType=="sell" and sellCatalog or buyCatalog)}))
-end
-
-commandHandlers.remove_catalog_item = function(from, port, msg)
-    if not isAdmin(from) then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
-        return
-    end
-    local catalogType = tostring(msg.catalog or "buy")
-    local idx = math.floor(num(msg.index, 0))
-    local catalog = (catalogType == "sell" and sellCatalog) or buyCatalog
-    if idx < 1 or idx > #catalog then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный индекс"}))
-        return
-    end
-    table.remove(catalog, idx)
-    if catalogType == "sell" then rebuildSellIndex() else rebuildBuyIndex() end
-    saveCatalog()
-    logEvent("Админ удалил товар из каталога " .. catalogType .. " с индексом " .. idx)
-    modem.send(from, 0xffef, serialization.serialize({op="remove_catalog_item_response", success=true}))
-end
-
-commandHandlers.update_catalog_item = function(from, port, msg)
-    if not isAdmin(from) then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Доступ запрещён"}))
-        return
-    end
-    local catalogType = tostring(msg.catalog or "buy")
-    local idx = math.floor(num(msg.index, 0))
-    local catalog = (catalogType == "sell" and sellCatalog) or buyCatalog
-    if idx < 1 or idx > #catalog then
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный индекс"}))
-        return
-    end
-    local old = catalog[idx]
-    catalog[idx] = {
-        displayName = tostring(msg.displayName or old.displayName),
-        internalName = tostring(msg.internalName or old.internalName),
-        damage = math.floor(num(msg.damage, old.damage or 0)),
-        priceCoin = num(msg.priceCoin, old.priceCoin or 0),
-        priceEma = num(msg.priceEma, old.priceEma or 0),
-        article = tostring(msg.article or old.article or ""),
-        enabled = msg.enabled ~= nil and msg.enabled or old.enabled,
-        maxQty = num(msg.maxQty, old.maxQty or 0)
+    -- Тестовый каталог продаж (можно тоже загрузить из файла позже)
+    state.sellCatalog = {
+        {displayName="Железный слиток", internalName="minecraft:iron_ingot", damage=0, priceCoin=1, priceEma=0, article="#SELL-001", enabled=true, maxQty=0},
     }
-    if catalogType == "sell" then rebuildSellIndex() else rebuildBuyIndex() end
-    saveCatalog()
-    logEvent("Админ обновил товар в каталоге " .. catalogType .. " с индексом " .. idx)
-    modem.send(from, 0xffef, serialization.serialize({op="update_catalog_item_response", success=true}))
+    return state
 end
 
-commandHandlers.get_catalog = function(from, port, msg)
-    local catalogType = tostring(msg.catalog or "buy")
-    if msg.op == "get_sell_catalog" then catalogType = "sell" end
-    local catalog = (catalogType == "sell" and sellCatalog) or buyCatalog
-    modem.send(from, 0xffef, serialization.serialize({
-        op = "catalog_data",
-        catalog = catalogType,
-        items = catalog
-    }))
-end
-commandHandlers.get_sell_catalog = commandHandlers.get_catalog
+local state=readTable(STATE_FILE)or defaultState()
+state.buyCatalog=type(state.buyCatalog)=="table"and state.buyCatalog or{}
+state.sellCatalog=type(state.sellCatalog)=="table"and state.sellCatalog or{}
+state.users=type(state.users)=="table"and state.users or{}
+state.transactions=type(state.transactions)=="table"and state.transactions or{}
+state.operations=type(state.operations)=="table"and state.operations or{}
+state.terminals=type(state.terminals)=="table"and state.terminals or{}
+state.nextTransaction=math.max(1,math.floor(num(state.nextTransaction,1)))
+state.buyVersion=num(state.buyVersion,1)state.sellVersion=num(state.sellVersion,1)state.maintenance=state.maintenance==true
 
--- Обработчик неизвестных команд
-local function handleOldRequest(from, port, msg)
-    local op = msg.op
-    local handler = commandHandlers[op]
-    if handler then
-        handler(from, port, msg)
-    else
-        modem.send(from, 0xffef, serialization.serialize({op="error", message="Неизвестная команда"}))
-    end
-end
+local function prune()while #state.transactions>MAX_TRANSACTIONS do table.remove(state.transactions,1)end local count=0 for _ in pairs(state.operations)do count=count+1 end if count>MAX_OPERATIONS then local arr={}for id,op in pairs(state.operations)do arr[#arr+1]={id=id,t=num(op.createdAtUptime,0)}end table.sort(arr,function(a,b)return a.t<b.t end)for i=1,count-MAX_OPERATIONS do state.operations[arr[i].id]=nil end end end
+local function saveState()prune()state.updatedAt=stamp()return atomicSave(STATE_FILE,state)end
+saveState()
 
--- 13. АДМИН-ПАНЕЛЬ (UI)
-local WIDTH, HEIGHT = gpu.getResolution()
-local maxW, maxH = gpu.maxResolution()
-if maxW and maxH and (WIDTH < maxW or HEIGHT < maxH) then
-    gpu.setResolution(maxW, maxH)
-    WIDTH, HEIGHT = gpu.getResolution()
-end
+local buyIndex,sellIndex={},{}
+local function ikey(id,dmg)return tostring(id or "")..":"..tostring(math.floor(num(dmg,0)))end
+local function rebuild()buyIndex={}sellIndex={}for i,item in ipairs(state.buyCatalog)do if type(item)=="table"and item.internalName then buyIndex[ikey(item.internalName,item.damage)]={index=i,item=item}end end for i,item in ipairs(state.sellCatalog)do if type(item)=="table"and item.internalName then sellIndex[ikey(item.internalName,item.damage)]={index=i,item=item}end end end
+rebuild()
 
-local C = {
-    bg = 0x0C0C0C, panel = 0x11191D, header = 0x0A0A0A, line = 0x27BDEC,
-    accent = 0x0C9A76, white = 0xFFFFFF, gray = 0xAAAAAA, dark = 0x555555,
-    green = 0x55FF55, yellow = 0xFFAA00, red = 0xFF5555, cyan = 0x55FFFF,
-    selected = 0x002440, input = 0x1A1A1A, button = 0x0A502D, alt = 0x1A5A6B,
-    danger = 0x8B1A1A, pause = 0x8A5A00, orange = 0xFF8800, magenta = 0xFF44FF,
-}
+local function findUser(name)name=tostring(name or "")for stored in pairs(state.users)do if tostring(stored):lower()==name:lower()then return stored end end return nil end
+local function ensureUser(name)name=tostring(name or "")local stored=findUser(name)or name if stored==""then return nil,nil end if type(state.users[stored])~="table"then state.users[stored]={balanceCoin=0,balanceEma=0,transactions=0,regDate=stamp(),agreed=true,banned=false,banDuration=0}saveState()end return stored,state.users[stored]end
+local function publicUser(name,u)return{found=type(u)=="table",name=name,balanceCoin=num(u and u.balanceCoin,0),balanceEma=num(u and u.balanceEma,0),transactions=math.floor(num(u and u.transactions,0)),regDate=u and u.regDate or nil,agreed=u and u.agreed==true,banned=u and u.banned==true,banReason=u and u.banReason or nil,banDuration=math.floor(num(u and u.banDuration,0)),bannedBy=u and u.bannedBy or nil,bannedAt=u and u.bannedAt or nil}end
+local function nextTx()local n=state.nextTransaction state.nextTransaction=n+1 return n end
 
-local tabDescriptions = {
-    buy = "Управление товарами, которые магазин продаёт игрокам. Можно добавлять, редактировать и удалять товары.",
-    sell = "Управление товарами, которые магазин скупает у игроков. Можно добавлять, редактировать и удалять товары.",
-    users = "Просмотр и редактирование данных игроков: баланс, транзакции, блокировки, статус соглашения и наличие отзыва.",
-    stats = "Общая статистика сервера: количество покупок, продаж, оборот, репортов и количество игроков.",
-    reports = "Просмотр жалоб (репортов), отправленных игроками. Можно отмечать их как разрешённые.",
-    feedbacks = "Просмотр и удаление отзывов, оставленных игроками. Можно также добавлять отзывы через клиент.",
-    admins = "Управление администраторами (добавление/удаление). Пока демонстрационная функция.",
-    journal = "Журнал важных событий сервера (покупки, продажи, блокировки и т.д.). Пока в разработке.",
-    storeStatus = "Включение/выключение магазина. При выключении игроки не могут совершать покупки и продажи.",
-    sync = "Загрузка каталога скупки из внешнего репозитория GitHub. Обновляет список товаров для скупки."
-}
+local function registerTerminal(address,id)id=tostring(id or "")if id==""then id="TERM-"..tostring(address):sub(1,8)end local t=state.terminals[id]local created=false if type(t)~="table"then t={id=id,address=address,name=id,paused=false,lastSeen=computer.uptime(),createdAt=stamp()}state.terminals[id]=t created=true end t.address=address t.lastSeen=computer.uptime()t.online=true if created then saveState()end return t end
 
-local function fill(x, y, w, h, bg, ch)
-    if w <= 0 or h <= 0 then return end
-    gpu.setBackground(bg or C.bg); gpu.fill(x, y, w, h, ch or " ")
-end
-local function write(x, y, v, fg, bg)
-    if y < 1 or y > HEIGHT or x > WIDTH then return end
-    v = tostring(v or ""); if x < 1 then v = usub(v, 2 - x); x = 1 end
-    if v == "" then return end
-    gpu.setForeground(fg or C.white); gpu.setBackground(bg or C.bg)
-    gpu.set(x, y, trunc(v, WIDTH - x + 1))
-end
-local function centerX(v, left, w)
-    left = left or 1; w = w or WIDTH
-    return left + math.max(0, math.floor((w - ulen(v)) / 2))
-end
-local function center(y, v, fg, bg, left, w)
-    write(centerX(v, left, w), y, v, fg, bg)
-end
-local function box(x, y, w, h, fg, bg)
-    if w < 2 or h < 2 then return end
-    fg = fg or C.line; bg = bg or C.bg
-    write(x, y, "┌" .. string.rep("─", w - 2) .. "┐", fg, bg)
-    for r = y + 1, y + h - 2 do
-        write(x, r, "│", fg, bg)
-        write(x + w - 1, r, "│", fg, bg)
-    end
-    write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
+local function sendChunks(address,port,requestId,response)local raw=serialization.serialize(response)local total=math.max(1,math.ceil(#raw/CHUNK_SIZE))for i=1,total do local first=(i-1)*CHUNK_SIZE+1 local chunk=raw:sub(first,first+CHUNK_SIZE-1)modem.send(address,port,PROTOCOL,"chunk",NETWORK_KEY,requestId,i,total,chunk)if total>1 then os.sleep(0.02)end end end
+local function broadcast(action,data)modem.broadcast(CLIENT_PORT,PROTOCOL,"push",NETWORK_KEY,action,serialization.serialize(data or{}))end
+local function directPush(address,action,data)if address and address~=""then modem.send(address,CLIENT_PORT,PROTOCOL,"push",NETWORK_KEY,action,serialization.serialize(data or{}))end end
+
+local function allowed(address,payload)if type(payload)~="table"then return false,"Пустой запрос"end local action=tostring(payload.action or "")if action=="discover"then return true end local terminal=registerTerminal(address,payload.terminalId)if terminal.paused and action~="hello"and action~="heartbeat"and action~="get_state"and action~="session_close"then return false,"Терминал поставлен на паузу"end return true,terminal end
+local function sameOwner(op,name)return tostring(op.player or ""):lower()==tostring(name or ""):lower()end
+
+local function doPurchase(payload,terminal)
+ local player=tostring(payload.name or payload.player or "")local txid=tostring(payload.transactionId or "")local id=tostring(payload.item or payload.internalName or "")local dmg=math.floor(num(payload.damage,0))local qty=math.floor(num(payload.qty,0))
+ if txid==""or player==""or id==""or qty<=0 then return{status="error",message="Некорректные данные покупки"}end
+ local old=state.operations[txid]if type(old)=="table"then if old.type~="buy"then return{status="error",message="ID занят продажей"}end if not sameOwner(old,player)then return{status="error",message="ID принадлежит другому игроку"}end return{status="ok",duplicate=true,data=clone(old.response or{})}end
+ if state.maintenance then return{status="error",message="Магазин на техработах"}end if terminal and terminal.paused then return{status="error",message="Терминал на паузе"}end
+ local stored,u=ensureUser(player)if not u then return{status="error",message="Игрок не найден"}end if u.banned then return{status="error",message="Доступ игрока заблокирован"}end
+ local found=buyIndex[ikey(id,dmg)]local item=found and found.item if not item or item.enabled==false then return{status="error",message="Товар отсутствует в покупках"}end
+ local uc,ue=num(item.priceCoin,0),num(item.priceEma,0)local totalC,totalE=uc*qty,ue*qty local beforeC,beforeE=num(u.balanceCoin,0),num(u.balanceEma,0)
+ if beforeC<totalC or beforeE<totalE then return{status="error",message="Недостаточно средств",data={balanceCoin=beforeC,balanceEma=beforeE,requiredCoin=totalC,requiredEma=totalE}}end
+ local txnum=nextTx()local oldTrans=num(u.transactions,0)u.balanceCoin=beforeC-totalC u.balanceEma=beforeE-totalE u.transactions=math.floor(oldTrans)+1
+ local transaction={id=txnum,transactionId=txid,player=stored,type="buy",item=tostring(item.displayName or id),internalName=id,damage=dmg,qty=qty,coin=totalC,ema=totalE,date=stamp()}
+ state.transactions[#state.transactions+1]=transaction
+ local response={transactionId=txid,transaction=txnum,beforeCoin=beforeC,beforeEma=beforeE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions,qty=qty,unitCoin=uc,unitEma=ue,totalCoin=totalC,totalEma=totalE}
+ state.operations[txid]={type="buy",status="charged",player=stored,requestedQty=qty,unitCoin=uc,unitEma=ue,transactionIndex=#state.transactions,response=clone(response),createdAt=stamp(),createdAtUptime=computer.uptime()}
+ local ok,err=saveState()if not ok then state.operations[txid]=nil table.remove(state.transactions)state.nextTransaction=txnum u.balanceCoin=beforeC u.balanceEma=beforeE u.transactions=oldTrans return{status="error",message=err or "Ошибка сохранения"}end
+ broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
 end
 
-local ui = {
-    tab = "buy",
-    selected = 1,
-    scroll = 0,
-    search = "",
-    searchFocused = false,
-    activeField = nil,
-    fields = {},
-    buttons = {},
-    rows = {},
-    form = {},
-    message = "Сервер запущен",
-    messageColor = C.green,
-    lastDraw = 0
-}
-
-local tabs = {
-    { id = "buy", title = "ПОКУПКИ" },
-    { id = "sell", title = "ПРОДАЖИ" },
-    { id = "users", title = "ИГРОКИ" },
-    { id = "stats", title = "СТАТИСТИКА" },
-    { id = "reports", title = "РЕПОРТЫ" },
-    { id = "feedbacks", title = "ОТЗЫВЫ" },
-    { id = "admins", title = "АДМИНИСТРАТОРЫ" },
-    { id = "journal", title = "ЖУРНАЛ" },
-    { id = "storeStatus", title = "ПРИОСТАНОВИТЬ МАГАЗИН" },
-    { id = "sync", title = "СИНХРОНИЗАЦИЯ" },
-}
-
-local TOP = 4
-local BOTTOM = 3
-local MAIN_Y = TOP + 1
-local MAIN_H = HEIGHT - TOP - BOTTOM
-local LEFT_W = math.max(38, math.floor(WIDTH * 0.52))
-local RIGHT_X = LEFT_W + 2
-local RIGHT_W = WIDTH - RIGHT_X
-local LIST_Y = MAIN_Y + 3
-local LIST_H = MAIN_H - 4
-
-local function msg(v, c) ui.message = tostring(v or ""); ui.messageColor = c or C.white end
-local function clearControls() ui.fields = {}; ui.buttons = {}; ui.rows = {} end
-local function addField(id, label, value, x, y, w, opt)
-    opt = opt or {}
-    local f = { id = id, label = label, value = tostring(value or ""), x = x, y = y, w = w, numeric = opt.numeric == true, readonly = opt.readonly == true }
-    ui.fields[#ui.fields + 1] = f
-    return f
-end
-local function addButton(id, label, x, y, w, bg, fg)
-    local b = { id = id, label = label, x = x, y = y, w = w, bg = bg or C.button, fg = fg or C.white }
-    ui.buttons[#ui.buttons + 1] = b
-    fill(x, y, w, 1, b.bg)
-    center(y, label, b.fg, b.bg, x, w)
-    return b
-end
-local function fby(id) for _, f in ipairs(ui.fields) do if f.id == id then return f end end end
-local function fv(id) local f = fby(id); return f and f.value or "" end
-local function drawField(f, focus)
-    write(f.x, f.y, f.label, C.gray, C.bg)
-    local ix = f.x + 15
-    local iw = math.max(8, f.w - 15)
-    fill(ix, f.y, iw, 1, C.input)
-    write(ix + 1, f.y, trunc(f.value, iw - 2), f.readonly and C.dark or (focus and C.cyan or C.white), C.input)
+local function adjustPurchase(payload)
+ local txid=tostring(payload.transactionId or "")local delivered=math.max(0,math.floor(num(payload.deliveredQty,0)))local op=state.operations[txid]
+ if type(op)~="table"or op.type~="buy"then return{status="error",message="Покупка не найдена"}end if op.status=="adjusted"then return{status="ok",duplicate=true,data=clone(op.adjustResponse or{})}end
+ local requested=math.max(0,math.floor(num(op.requestedQty,0)))delivered=math.min(requested,delivered)local missing=requested-delivered local refundC,refundE=num(op.unitCoin,0)*missing,num(op.unitEma,0)*missing
+ local stored=findUser(op.player)local u=stored and state.users[stored]if not u then return{status="error",message="Игрок операции не найден"}end
+ u.balanceCoin=num(u.balanceCoin,0)+refundC u.balanceEma=num(u.balanceEma,0)+refundE if delivered==0 then u.transactions=math.max(0,math.floor(num(u.transactions,0))-1)end
+ local tx=state.transactions[op.transactionIndex]if type(tx)=="table"then tx.qty=delivered tx.coin=num(op.unitCoin,0)*delivered tx.ema=num(op.unitEma,0)*delivered tx.adjusted=true tx.refundedQty=missing end
+ local response={transactionId=txid,deliveredQty=delivered,refundedQty=missing,refundCoin=refundC,refundEma=refundE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions}
+ op.status="adjusted"op.deliveredQty=delivered op.adjustResponse=clone(response)op.updatedAt=stamp()saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
 end
 
-local function getCatalog(tab)
-    if tab == "buy" then return buyCatalog else return sellCatalog end
+local function finalizePurchase(payload)local txid=tostring(payload.transactionId or "")local op=state.operations[txid]if type(op)~="table"or op.type~="buy"then return{status="error",message="Покупка не найдена"}end if op.status~="adjusted"then op.status="completed"op.deliveredQty=op.requestedQty op.completedAt=stamp()saveState()end return{status="ok",data={transactionId=txid,status=op.status}}end
+
+local function doSale(payload,terminal)
+ local player=tostring(payload.name or payload.player or "")local txid=tostring(payload.transactionId or "")local id=tostring(payload.item or payload.internalName or "")local dmg=math.floor(num(payload.damage,0))local qty=math.floor(num(payload.qty,0))
+ if txid==""or player==""or id==""or qty<=0 then return{status="error",message="Некорректные данные продажи"}end
+ local old=state.operations[txid]if type(old)=="table"then if old.type~="sell"then return{status="error",message="ID занят покупкой"}end if not sameOwner(old,player)then return{status="error",message="ID принадлежит другому игроку"}end return{status="ok",duplicate=true,data=clone(old.response or{})}end
+ if state.maintenance then return{status="error",message="Магазин на техработах"}end if terminal and terminal.paused then return{status="error",message="Терминал на паузе"}end
+ local stored,u=ensureUser(player)if not u then return{status="error",message="Игрок не найден"}end if u.banned then return{status="error",message="Доступ игрока заблокирован"}end
+ local found=sellIndex[ikey(id,dmg)]local item=found and found.item if not item or item.enabled==false then return{status="error",message="Товар отсутствует в продажах"}end
+ local uc,ue=num(item.priceCoin,0),num(item.priceEma,0)local earnedC,earnedE=uc*qty,ue*qty local beforeC,beforeE=num(u.balanceCoin,0),num(u.balanceEma,0)local oldTrans=num(u.transactions,0)local txnum=nextTx()
+ u.balanceCoin=beforeC+earnedC u.balanceEma=beforeE+earnedE u.transactions=math.floor(oldTrans)+1
+ local tx={id=txnum,transactionId=txid,player=stored,type="sell",item=tostring(item.displayName or id),internalName=id,damage=dmg,qty=qty,coin=earnedC,ema=earnedE,date=stamp()}state.transactions[#state.transactions+1]=tx
+ local response={transactionId=txid,transaction=txnum,beforeCoin=beforeC,beforeEma=beforeE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions,qty=qty,unitCoin=uc,unitEma=ue,earnedCoin=earnedC,earnedEma=earnedE}
+ state.operations[txid]={type="sell",status="completed",player=stored,qty=qty,response=clone(response),createdAt=stamp(),createdAtUptime=computer.uptime()}
+ local ok,err=saveState()if not ok then state.operations[txid]=nil table.remove(state.transactions)state.nextTransaction=txnum u.balanceCoin=beforeC u.balanceEma=beforeE u.transactions=oldTrans return{status="error",message=err or "Ошибка сохранения"}end
+ broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
 end
 
-local function listData()
-    local r = {}
-    local q = tostring(ui.search or ""):lower()
-    if ui.tab == "buy" or ui.tab == "sell" then
-        local src = getCatalog(ui.tab)
-        for i, item in ipairs(src) do
-            local name = tostring(item.displayName or item.internalName or "")
-            if q == "" or name:lower():find(q, 1, true) then
-                r[#r + 1] = { sourceIndex = i, title = name, sub = tostring(item.internalName or "") .. " | " .. trim(item.priceCoin or 0) .. " COINA" .. (item.maxQty and item.maxQty > 0 and " | Остаток: " .. item.maxQty or ""), raw = item }
-            end
-        end
-        table.sort(r, function(a, b) return a.title:lower() < b.title:lower() end)
-    elseif ui.tab == "users" then
-        for name, u in pairs(players) do
-            if q == "" or tostring(name):lower():find(q, 1, true) then
-                r[#r + 1] = { key = name, title = name, sub = "Баланс: " .. trim(u.balance) .. " | Транзакций: " .. (u.transactions or 0), raw = u }
-            end
-        end
-        table.sort(r, function(a, b) return a.title:lower() < b.title:lower() end)
-    elseif ui.tab == "stats" then
-        r = { { title = "Статистика", sub = "", raw = globalStats } }
-    elseif ui.tab == "reports" then
-        local reports = {}
-        if filesystem.exists(REPORTS_LOG) then
-            local file = io.open(REPORTS_LOG, "r")
-            local content = file:read("*a")
-            file:close()
-            for line in content:gmatch("[^\n]+") do
-                table.insert(reports, line)
-            end
-        end
-        for i = #reports, 1, -1 do
-            local line = reports[i]
-            if q == "" or line:lower():find(q, 1, true) then
-                r[#r + 1] = { key = i, title = trunc(line, 30), sub = "", raw = line }
-            end
-        end
-    elseif ui.tab == "feedbacks" then
-        for i = #feedbacks, 1, -1 do
-            local f = feedbacks[i]
-            local title = (f.name or "") .. ": " .. (f.text or "")
-            if q == "" or title:lower():find(q, 1, true) then
-                r[#r + 1] = { key = i, title = trunc(title, 30), sub = f.time or "", raw = f }
-            end
-        end
-    elseif ui.tab == "admins" then
-        r = { { key = 1, title = ADMIN_NAME, sub = "Главный администратор", raw = {} } }
-    elseif ui.tab == "journal" then
-        r = { { title = "Журнал событий", sub = "В разработке", raw = {} } }
-    elseif ui.tab == "storeStatus" then
-        r = { { title = "Статус магазина", sub = shopPaused and "ПРИОСТАНОВЛЕН" or "АКТИВЕН", raw = { paused = shopPaused } } }
-    elseif ui.tab == "sync" then
-        r = { { title = "Синхронизация каталога", sub = "Загрузить из удалённого репозитория", raw = {} } }
-    end
-    return r
+local function handle(address,payload)
+ local ok,terminal=allowed(address,payload)if not ok then return{status="error",message=terminal}end local action=tostring(payload.action or "")
+ if action=="hello"or action=="heartbeat"then return{status="ok",data={serverAddress=modem.address,maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion}}
+ elseif action=="get_state"then return{status="ok",data={maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion}}
+ elseif action=="session_open"then local stored,u=ensureUser(payload.name or payload.player)return{status="ok",data={maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion,user=publicUser(stored or payload.name,u)}}
+ elseif action=="session_close"then return{status="ok",data={closed=true}}
+ elseif action=="get_catalog"then if tostring(payload.catalog or "buy")=="sell"then return{status="ok",data={version=state.sellVersion,sellItems=clone(state.sellCatalog)}}end return{status="ok",data={version=state.buyVersion,catalog=clone(state.buyCatalog)}}
+ elseif action=="get_balance"then local stored=findUser(payload.name or payload.player)local u=stored and state.users[stored]return{status="ok",data=publicUser(stored or payload.name,u)}
+ elseif action=="check_ban"then local stored=findUser(payload.name or payload.player)local u=stored and state.users[stored]return{status="ok",data={banned=u and u.banned==true or false,reason=u and u.banReason or nil,duration=u and u.banDuration or 0,admin=u and u.bannedBy or nil,date=u and u.bannedAt or nil}}
+ elseif action=="update_balance"then local stored,u=ensureUser(payload.name or payload.player)if not u then return{status="error",message="Имя игрока обязательно"}end if payload.coin~=nil then u.balanceCoin=num(payload.coin,u.balanceCoin)end if payload.ema~=nil then u.balanceEma=num(payload.ema,u.balanceEma)end if payload.transactions~=nil then u.transactions=math.max(0,math.floor(num(payload.transactions,u.transactions)))end if payload.agreed~=nil then u.agreed=payload.agreed==true end if payload.regDate then u.regDate=tostring(payload.regDate)end saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=publicUser(stored,u)}
+ elseif action=="purchase"then return doPurchase(payload,terminal)
+ elseif action=="adjust_purchase"or action=="refund_purchase"then return adjustPurchase(payload)
+ elseif action=="finalize_purchase"then return finalizePurchase(payload)
+ elseif action=="sell"then return doSale(payload,terminal)
+ elseif action=="get_operation"then local op=state.operations[tostring(payload.transactionId or "")]return{status="ok",data={found=type(op)=="table",operation=type(op)=="table"and clone(op)or nil}}
+ end return{status="error",message="Неизвестное действие: "..action}
 end
 
-local function selected(list)
-    if #list == 0 then return nil end
-    ui.selected = math.max(1, math.min(ui.selected, #list))
-    return list[ui.selected]
-end
+-- ================= ADMIN GUI =================
+local ui={tab="buy",selected=1,scroll=0,search="",searchFocused=false,activeField=nil,fields={},buttons={},rows={},form={},message="Сервер запущен",messageColor=C.green,lastDraw=0}
+local tabs={{id="buy",title="ПОКУПКИ"},{id="sell",title="ПРОДАЖИ"},{id="users",title="ПОЛЬЗОВАТЕЛИ"},{id="transactions",title="ТРАНЗАКЦИИ"},{id="terminals",title="ТЕРМИНАЛЫ"}}
+local TOP=4 local BOTTOM=3 local MAIN_Y=TOP+1 local MAIN_H=HEIGHT-TOP-BOTTOM local LEFT_W=math.max(38,math.floor(WIDTH*0.52))local RIGHT_X=LEFT_W+2 local RIGHT_W=WIDTH-RIGHT_X local LIST_Y=MAIN_Y+3 local LIST_H=MAIN_H-4
+local function msg(v,c)ui.message=tostring(v or "")ui.messageColor=c or C.white end
+local function clearControls()ui.fields={}ui.buttons={}ui.rows={}end
+local function addField(id,label,value,x,y,w,opt)opt=opt or{}local f={id=id,label=label,value=tostring(value or ""),x=x,y=y,w=w,numeric=opt.numeric==true,readonly=opt.readonly==true}ui.fields[#ui.fields+1]=f return f end
+local function addButton(id,label,x,y,w,bg,fg)local b={id=id,label=label,x=x,y=y,w=w,bg=bg or C.button,fg=fg or C.white}ui.buttons[#ui.buttons+1]=b fill(x,y,w,1,b.bg)center(y,label,b.fg,b.bg,x,w)return b end
+local function fby(id)for _,f in ipairs(ui.fields)do if f.id==id then return f end end end
+local function fv(id)local f=fby(id)return f and f.value or "" end
+local function drawField(f,focus)write(f.x,f.y,f.label,C.gray,C.bg)local ix=f.x+15 local iw=math.max(8,f.w-15)fill(ix,f.y,iw,1,C.input)write(ix+1,f.y,trunc(f.value,iw-2),f.readonly and C.dark or(focus and C.cyan or C.white),C.input)end
 
-local function loadForm()
-    local e = selected(listData())
-    ui.form = {}
-    if ui.tab == "buy" or ui.tab == "sell" then
-        local it = e and e.raw or {}
-        ui.form = {
-            displayName = tostring(it.displayName or ""),
-            internalName = tostring(it.internalName or ""),
-            damage = tostring(it.damage or 0),
-            priceCoin = trim(it.priceCoin or 0),
-            priceEma = trim(it.priceEma or 0),
-            article = tostring(it.article or ""),
-            enabled = it.enabled ~= false,
-            maxQty = tostring(it.maxQty or 0),
-            sourceIndex = e and e.sourceIndex or nil
-        }
-    elseif ui.tab == "users" then
-        local u = e and e.raw or {}
-        ui.form = {
-            name = e and e.key or "",
-            balance = trim(u.balance or 0),
-            transactions = tostring(u.transactions or 0),
-            regDate = u.regDate or "",
-            agreed = u.agreed == true,
-            banned = u.banned == true,
-            hasFeedback = u.hasFeedback == true,
-            banReason = u.banReason or "",
-            banDuration = tostring(u.banDuration or 0),
-            bannedBy = u.bannedBy or "",
-            bannedAt = u.bannedAt or ""
-        }
-    elseif ui.tab == "stats" then
-        ui.form = clone(globalStats)
-    elseif ui.tab == "reports" then
-        ui.form = { report = e and e.raw or "" }
-    elseif ui.tab == "feedbacks" then
-        ui.form = { name = (e and e.raw and e.raw.name) or "", text = (e and e.raw and e.raw.text) or "", time = (e and e.raw and e.raw.time) or "" }
-    elseif ui.tab == "admins" then
-        ui.form = { adminName = ADMIN_NAME }
-    elseif ui.tab == "journal" then
-        ui.form = { journal = "Журнал событий (можно расширить)" }
-    elseif ui.tab == "storeStatus" then
-        ui.form = { paused = shopPaused }
-    elseif ui.tab == "sync" then
-        ui.form = { remoteUrl = REMOTE_SHOP_ITEMS_URL }
-    end
-end
+local function listData()local r={}local q=tostring(ui.search or ""):lower()if ui.tab=="buy"or ui.tab=="sell"then local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog for i,it in ipairs(src)do local name=tostring(it.displayName or it.internalName or "")if q==""or name:lower():find(q,1,true)then r[#r+1]={sourceIndex=i,title=name,sub=tostring(it.internalName or ""),raw=it}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)
+ elseif ui.tab=="users"then for name,u in pairs(state.users)do if q==""or tostring(name):lower():find(q,1,true)then r[#r+1]={key=name,title=name,sub="COINA "..trim(u.balanceCoin).." | EMA "..trim(u.balanceEma),raw=u}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)
+ elseif ui.tab=="transactions"then for i=#state.transactions,1,-1 do local t=state.transactions[i]local title="#"..tostring(t.id or i).." "..tostring(t.player or "?")local full=title.." "..tostring(t.item or "")if q==""or full:lower():find(q,1,true)then r[#r+1]={sourceIndex=i,title=title,sub=tostring(t.type or "").." | "..tostring(t.item or "").." ×"..tostring(t.qty or 0),raw=t}end end
+ else for id,t in pairs(state.terminals)do local title=tostring(t.name or id)if q==""or title:lower():find(q,1,true)then r[#r+1]={key=id,title=title,sub=t.online and"ONLINE"or"OFFLINE",raw=t}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)end return r end
+local function selected(list)if #list==0 then return nil end ui.selected=math.max(1,math.min(ui.selected,#list))return list[ui.selected]end
+local function loadForm()local e=selected(listData())ui.form={}if ui.tab=="buy"or ui.tab=="sell"then local it=e and e.raw or{}ui.form={displayName=tostring(it.displayName or""),internalName=tostring(it.internalName or""),damage=tostring(it.damage or 0),priceCoin=trim(it.priceCoin or 0),priceEma=trim(it.priceEma or 0),article=tostring(it.article or""),enabled=it.enabled~=false,sourceIndex=e and e.sourceIndex or nil}
+ elseif ui.tab=="users"then local u=e and e.raw or{}ui.form={name=e and e.key or"",balanceCoin=trim(u.balanceCoin or 0),balanceEma=trim(u.balanceEma or 0),transactions=tostring(u.transactions or 0),reason=tostring(u.banReason or""),duration=tostring(u.banDuration or 0),admin=tostring(u.bannedBy or"Admin"),banned=u.banned==true}
+ elseif ui.tab=="terminals"then local t=e and e.raw or{}ui.form={id=e and e.key or"",name=tostring(t.name or(e and e.key)or""),address=tostring(t.address or""),paused=t.paused==true,online=t.online==true}end end
 
-local function catalogEditor()
-    local x = RIGHT_X; local w = RIGHT_W
-    local title = (ui.tab == "buy" and "РЕДАКТОР ПОКУПКИ" or "РЕДАКТОР ПРОДАЖИ")
-    write(x, MAIN_Y + 1, trunc(title, w), C.accent, C.bg)
-    addField("displayName", "Название:", ui.form.displayName, x, MAIN_Y + 4, w - 2)
-    addField("internalName", "ID предмета:", ui.form.internalName, x, MAIN_Y + 6, w - 2)
-    addField("damage", "Damage:", ui.form.damage, x, MAIN_Y + 8, w - 2, { numeric = true })
-    addField("priceCoin", "COINA:", ui.form.priceCoin, x, MAIN_Y + 10, w - 2, { numeric = true })
-    addField("priceEma", "EMA:", ui.form.priceEma, x, MAIN_Y + 12, w - 2, { numeric = true })
-    addField("article", "Артикул:", ui.form.article, x, MAIN_Y + 14, w - 2)
-    addField("maxQty", "Остаток:", ui.form.maxQty, x, MAIN_Y + 16, w - 2, { numeric = true })
-    write(x, MAIN_Y + 18, "Активен:", C.gray, C.bg)
-    addButton("toggle_enabled", "[ " .. (ui.form.enabled and "ДА" or "НЕТ") .. " ]", x + 15, MAIN_Y + 18, 10, ui.form.enabled and C.button or C.danger)
-    local y = MAIN_Y + 21
-    addButton("save_item", "[ СОХРАНИТЬ ]", x, y, 18, C.button)
-    addButton("new_item", "[ НОВЫЙ ]", x + 20, y, 14, C.alt)
-    addButton("delete_item", "[ УДАЛИТЬ ]", x + 36, y, 16, C.danger)
-    write(x, MAIN_Y + 24, trunc("Всего товаров: " .. #getCatalog(ui.tab), w), C.gray, C.bg)
-end
+local function drawHeader()fill(1,1,WIDTH,TOP,C.header)center(1,"──── VIP-SHOP MODEM SERVER ────",C.accent,C.header)local x=2 for _,t in ipairs(tabs)do local w=ulen(t.title)+4 local active=ui.tab==t.id fill(x,3,w,1,active and C.selected or C.panel)center(3,t.title,active and C.cyan or C.gray,active and C.selected or C.panel,x,w)t.x=x t.w=w x=x+w+1 end local a="MODEM: "..tostring(modem.address)write(math.max(1,WIDTH-ulen(a)-1),1,a,C.gray,C.header)end
+local function drawList(list)fill(1,MAIN_Y,LEFT_W,MAIN_H,C.bg)box(1,MAIN_Y,LEFT_W,MAIN_H,C.line,C.bg)write(3,MAIN_Y+1,"ПОИСК:",C.gray,C.bg)local sx=11 local sw=LEFT_W-sx-2 fill(sx,MAIN_Y+1,sw,1,C.input)write(sx+1,MAIN_Y+1,trunc(ui.search,sw-2),ui.searchFocused and C.cyan or C.white,C.input)ui.rows={}local max=math.max(0,#list-LIST_H)ui.scroll=math.max(0,math.min(ui.scroll,max))for row=1,LIST_H do local idx=ui.scroll+row local e=list[idx]local y=LIST_Y+row-1 fill(2,y,LEFT_W-2,1,idx==ui.selected and C.selected or C.bg)if e then write(3,y,trunc(e.title,LEFT_W-5),idx==ui.selected and C.cyan or C.white,idx==ui.selected and C.selected or C.bg)ui.rows[#ui.rows+1]={y=y,index=idx}end end write(3,MAIN_Y+MAIN_H-2,"Всего: "..tostring(#list),C.gray,C.bg)end
+local function catalogEditor()local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,ui.tab=="buy"and"РЕДАКТОР ПОКУПКИ"or"РЕДАКТОР ПРОДАЖИ",C.accent,C.bg)addField("displayName","Название:",ui.form.displayName,x,MAIN_Y+4,w-2)addField("internalName","ID предмета:",ui.form.internalName,x,MAIN_Y+6,w-2)addField("damage","Damage:",ui.form.damage,x,MAIN_Y+8,w-2,{numeric=true})addField("priceCoin","COINA:",ui.form.priceCoin,x,MAIN_Y+10,w-2,{numeric=true})addField("priceEma","EMA:",ui.form.priceEma,x,MAIN_Y+12,w-2,{numeric=true})addField("article","Артикул:",ui.form.article,x,MAIN_Y+14,w-2)write(x,MAIN_Y+16,"Активен:",C.gray,C.bg)addButton("toggle_enabled","[ "..(ui.form.enabled and"ДА"or"НЕТ").." ]",x+15,MAIN_Y+16,10,ui.form.enabled and C.button or C.danger)local y=MAIN_Y+19 addButton("save_item","[ СОХРАНИТЬ ]",x,y,18,C.button)addButton("new_item","[ НОВЫЙ ]",x+20,y,14,C.alt)addButton("delete_item","[ УДАЛИТЬ ]",x+36,y,16,C.danger)write(x,MAIN_Y+22,"Версия: "..tostring(ui.tab=="buy"and state.buyVersion or state.sellVersion),C.gray,C.bg)end
+local function userEditor()local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,"ПОЛЬЗОВАТЕЛЬ",C.accent,C.bg)addField("name","Игрок:",ui.form.name,x,MAIN_Y+4,w-2)addField("balanceCoin","COINA:",ui.form.balanceCoin,x,MAIN_Y+6,w-2,{numeric=true})addField("balanceEma","EMA:",ui.form.balanceEma,x,MAIN_Y+8,w-2,{numeric=true})addField("transactions","Транзакции:",ui.form.transactions,x,MAIN_Y+10,w-2,{numeric=true})addField("reason","Причина:",ui.form.reason,x,MAIN_Y+13,w-2)addField("duration","Срок, сек:",ui.form.duration,x,MAIN_Y+15,w-2,{numeric=true})addField("admin","Администратор:",ui.form.admin,x,MAIN_Y+17,w-2)local y=MAIN_Y+20 addButton("save_user","[ СОХРАНИТЬ ]",x,y,18,C.button)addButton("new_user","[ НОВЫЙ ]",x+20,y,14,C.alt)addButton(ui.form.banned and"unban_user"or"ban_user",ui.form.banned and"[ РАЗБАНИТЬ ]"or"[ ЗАБАНИТЬ ]",x+36,y,18,ui.form.banned and C.button or C.danger)write(x,MAIN_Y+23,ui.form.banned and"СТАТУС: ЗАБЛОКИРОВАН"or"СТАТУС: ДОСТУП РАЗРЕШЁН",ui.form.banned and C.red or C.green,C.bg)end
+local function transactionEditor(e)local x=RIGHT_X write(x,MAIN_Y+1,"ТРАНЗАКЦИЯ",C.accent,C.bg)if not e then write(x,MAIN_Y+4,"Транзакции отсутствуют",C.gray,C.bg)return end local t=e.raw local lines={"Номер: #"..tostring(t.id or"?"),"Игрок: "..tostring(t.player or"?"),"Тип: "..tostring(t.type or"?"),"Товар: "..tostring(t.item or"?"),"ID: "..tostring(t.internalName or"?"),"Количество: "..tostring(t.qty or 0),"COINA: "..trim(t.coin or 0),"EMA: "..trim(t.ema or 0),"Дата: "..tostring(t.date or"?"),"Operation ID: "..tostring(t.transactionId or"?")}for i,l in ipairs(lines)do write(x,MAIN_Y+3+i,trunc(l,RIGHT_W-2),i==3 and C.cyan or C.white,C.bg)end end
+local function terminalEditor(e)local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,"ТЕРМИНАЛ",C.accent,C.bg)if not e then write(x,MAIN_Y+4,"Терминалы ещё не подключались",C.gray,C.bg)return end addField("terminal_name","Название:",ui.form.name,x,MAIN_Y+4,w-2)addField("terminal_id","Terminal ID:",ui.form.id,x,MAIN_Y+6,w-2,{readonly=true})addField("terminal_address","Modem ID:",ui.form.address,x,MAIN_Y+8,w-2,{readonly=true})write(x,MAIN_Y+11,"Статус: "..(ui.form.online and"ONLINE"or"OFFLINE"),ui.form.online and C.green or C.red,C.bg)write(x,MAIN_Y+12,"Пауза: "..(ui.form.paused and"ВКЛЮЧЕНА"or"ВЫКЛЮЧЕНА"),ui.form.paused and C.yellow or C.green,C.bg)local y=MAIN_Y+15 addButton("save_terminal","[ СОХРАНИТЬ ИМЯ ]",x,y,22,C.button)addButton(ui.form.paused and"resume_terminal"or"pause_terminal",ui.form.paused and"[ СНЯТЬ С ПАУЗЫ ]"or"[ ПОСТАВИТЬ НА ПАУЗУ ]",x+24,y,ui.form.paused and 22 or 26,ui.form.paused and C.button or C.pause)end
+local function drawRight(e)fill(RIGHT_X-1,MAIN_Y,RIGHT_W+1,MAIN_H,C.bg)box(RIGHT_X-1,MAIN_Y,RIGHT_W+1,MAIN_H,C.line,C.bg)if ui.tab=="buy"or ui.tab=="sell"then catalogEditor()elseif ui.tab=="users"then userEditor()elseif ui.tab=="transactions"then transactionEditor(e)else terminalEditor(e)end for i,f in ipairs(ui.fields)do drawField(f,ui.activeField==i)end end
+local function onlineCount()local c=0 local now=computer.uptime()for _,t in pairs(state.terminals)do t.online=now-num(t.lastSeen,0)<=OFFLINE_AFTER if t.online then c=c+1 end end return c end
+local function drawBottom()local y=HEIGHT-BOTTOM+1 fill(1,y,WIDTH,BOTTOM,C.header)addButton("toggle_maintenance",state.maintenance and"[ ТЕХ.РАБОТЫ: ВКЛ ]"or"[ ТЕХ.РАБОТЫ: ВЫКЛ ]",2,y+1,24,state.maintenance and C.danger or C.button)write(29,y+1,trunc("Сервер: ONLINE | Терминалов: "..onlineCount().." | Порт: "..SERVER_PORT,WIDTH-31),C.green,C.header)if ui.message~=""then write(2,y,trunc(ui.message,WIDTH-3),ui.messageColor,C.header)end end
+local function drawAll()clearControls()fill(1,1,WIDTH,HEIGHT,C.bg)drawHeader()local list=listData()if #list==0 then ui.selected=0 ui.scroll=0 elseif ui.selected<=0 then ui.selected=1 elseif ui.selected>#list then ui.selected=#list end drawList(list)local e=selected(list)drawRight(e)drawBottom()ui.lastDraw=computer.uptime()end
+local function reload()loadForm()ui.activeField=nil drawAll()end
 
-local function drawRight(e)
-    fill(RIGHT_X - 1, MAIN_Y, RIGHT_W + 1, MAIN_H, C.bg)
-    box(RIGHT_X - 1, MAIN_Y, RIGHT_W + 1, MAIN_H, C.line, C.bg)
-    local x = RIGHT_X; local w = RIGHT_W
+local function saveItem()local name,id=fv("displayName"),fv("internalName")if name==""or id==""then msg("Название и ID обязательны",C.red)drawAll()return end local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog local idx=ui.form.sourceIndex local it={displayName=name,internalName=id,damage=math.floor(num(fv("damage"),0)),priceCoin=num(fv("priceCoin"),0),priceEma=num(fv("priceEma"),0),article=fv("article"),enabled=ui.form.enabled~=false}if idx and src[idx]then src[idx]=it else src[#src+1]=it end if ui.tab=="buy"then state.buyVersion=state.buyVersion+1 else state.sellVersion=state.sellVersion+1 end rebuild()saveState()broadcast("catalog_updated",{catalog=ui.tab,version=ui.tab=="buy"and state.buyVersion or state.sellVersion})msg("Товар сохранён и отправлен терминалам",C.green)ui.selected=1 reload()end
+local function deleteItem()local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog local idx=ui.form.sourceIndex if not idx or not src[idx]then msg("Товар не выбран",C.red)drawAll()return end table.remove(src,idx)if ui.tab=="buy"then state.buyVersion=state.buyVersion+1 else state.sellVersion=state.sellVersion+1 end rebuild()saveState()broadcast("catalog_updated",{catalog=ui.tab,version=ui.tab=="buy"and state.buyVersion or state.sellVersion})msg("Товар удалён",C.yellow)ui.selected=math.max(1,ui.selected-1)reload()end
+local function saveUser()local name=fv("name")if name==""then msg("Укажите имя игрока",C.red)drawAll()return end local stored,u=ensureUser(name)u.balanceCoin=num(fv("balanceCoin"),u.balanceCoin)u.balanceEma=num(fv("balanceEma"),u.balanceEma)u.transactions=math.max(0,math.floor(num(fv("transactions"),u.transactions)))saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})msg("Баланс игрока сохранён",C.green)reload()end
+local function banUser(value)local name=fv("name")local stored,u=ensureUser(name)if not u then msg("Игрок не выбран",C.red)drawAll()return end u.banned=value==true if u.banned then u.banReason=fv("reason")~=""and fv("reason")or"Нарушение правил магазина"u.banDuration=math.max(0,math.floor(num(fv("duration"),0)))u.bannedBy=fv("admin")~=""and fv("admin")or"Admin"u.bannedAt=stamp()else u.banReason=nil u.banDuration=0 u.bannedBy=nil u.bannedAt=nil end saveState()broadcast(u.banned and"user_banned"or"user_unbanned",{player=stored,user=publicUser(stored,u),reason=u.banReason,duration=u.banDuration,admin=u.bannedBy,date=u.bannedAt})msg(u.banned and"Игрок заблокирован"or"Игрок разблокирован",u.banned and C.red or C.green)reload()end
+local function saveTerminal()local id=ui.form.id local t=id and state.terminals[id]if not t then return end t.name=fv("terminal_name")~=""and fv("terminal_name")or id saveState()msg("Название терминала сохранено",C.green)reload()end
+local function pauseTerminal(value)local id=ui.form.id local t=id and state.terminals[id]if not t then return end t.paused=value==true saveState()directPush(t.address,t.paused and"terminal_paused"or"terminal_resumed",{terminalId=id,paused=t.paused})msg(t.paused and"Терминал поставлен на паузу"or"Пауза снята",t.paused and C.yellow or C.green)reload()end
+local function action(id)if id=="toggle_enabled"then ui.form.enabled=not ui.form.enabled drawAll()elseif id=="save_item"then saveItem()elseif id=="new_item"then ui.form={displayName="",internalName="",damage="0",priceCoin="0",priceEma="0",article="",enabled=true}ui.activeField=nil drawAll()elseif id=="delete_item"then deleteItem()elseif id=="save_user"then saveUser()elseif id=="new_user"then ui.form={name="",balanceCoin="0",balanceEma="0",transactions="0",reason="",duration="0",admin="Admin",banned=false}ui.activeField=nil drawAll()elseif id=="ban_user"then banUser(true)elseif id=="unban_user"then banUser(false)elseif id=="save_terminal"then saveTerminal()elseif id=="pause_terminal"then pauseTerminal(true)elseif id=="resume_terminal"then pauseTerminal(false)elseif id=="toggle_maintenance"then state.maintenance=not state.maintenance saveState()broadcast("maintenance_changed",{maintenance=state.maintenance})msg(state.maintenance and"Техработы включены"or"Техработы выключены",state.maintenance and C.red or C.green)drawAll()end end
+local function inside(x,y,c)return y==c.y and x>=c.x and x<c.x+c.w end
+local function touch(x,y)for _,t in ipairs(tabs)do if y==3 and x>=t.x and x<t.x+t.w then ui.tab=t.id ui.selected=1 ui.scroll=0 ui.search=""ui.searchFocused=false loadForm()drawAll()return end end if y==MAIN_Y+1 and x>=11 and x<LEFT_W-1 then ui.searchFocused=true ui.activeField=nil drawAll()return end for _,r in ipairs(ui.rows)do if y==r.y and x>=2 and x<=LEFT_W then ui.selected=r.index ui.searchFocused=false loadForm()drawAll()return end end for i,f in ipairs(ui.fields)do local ix=f.x+15 local iw=math.max(8,f.w-15)if y==f.y and x>=ix and x<ix+iw and not f.readonly then ui.activeField=i ui.searchFocused=false drawAll()return end end for _,b in ipairs(ui.buttons)do if inside(x,y,b)then ui.activeField=nil ui.searchFocused=false action(b.id)return end end ui.activeField=nil ui.searchFocused=false drawAll()end
+local function scroll(direction)local list=listData()local max=math.max(0,#list-LIST_H)ui.scroll=math.max(0,math.min(max,ui.scroll-direction*3))if ui.selected<ui.scroll+1 then ui.selected=ui.scroll+1 end if ui.selected>ui.scroll+LIST_H then ui.selected=ui.scroll+LIST_H end drawAll()end
+local function key(char,code)if code==keyboard.keys.escape then ui.activeField=nil ui.searchFocused=false drawAll()return end if ui.searchFocused then if code==keyboard.keys.back then ui.search=usub(ui.search,1,-2)elseif code==keyboard.keys.enter or code==keyboard.keys.tab then ui.searchFocused=false elseif char and char>=32 then ui.search=ui.search..unicode.char(char)end ui.selected=1 ui.scroll=0 loadForm()drawAll()return end local f=ui.activeField and ui.fields[ui.activeField]if f and not f.readonly then if code==keyboard.keys.back then f.value=usub(f.value,1,-2)elseif code==keyboard.keys.enter or code==keyboard.keys.tab then ui.activeField=nil elseif char and char>=32 then local ch=unicode.char(char)if not f.numeric or ch:match("[%d%.,%-]")then f.value=f.value..ch end end if f.id=="terminal_name"then ui.form.name=f.value else ui.form[f.id]=f.value end drawAll()return end if code==keyboard.keys.up then ui.selected=math.max(1,ui.selected-1)if ui.selected<=ui.scroll then ui.scroll=math.max(0,ui.selected-1)end loadForm()drawAll()elseif code==keyboard.keys.down then local list=listData()ui.selected=math.min(#list,ui.selected+1)if ui.selected>ui.scroll+LIST_H then ui.scroll=ui.selected-LIST_H end loadForm()drawAll()end end
 
-    if ui.tab == "buy" or ui.tab == "sell" then
-        catalogEditor()
-    elseif ui.tab == "users" then
-        write(x, MAIN_Y + 1, "РЕДАКТОР ИГРОКА", C.accent, C.bg)
-        addField("name", "Игрок:", ui.form.name, x, MAIN_Y + 4, w - 2, { readonly = true })
-        addField("balance", "Баланс:", ui.form.balance, x, MAIN_Y + 6, w - 2, { numeric = true })
-        addField("transactions", "Транзакции:", ui.form.transactions, x, MAIN_Y + 8, w - 2, { numeric = true, readonly = true })
-        addField("regDate", "Дата регистрации:", ui.form.regDate, x, MAIN_Y + 10, w - 2, { readonly = true })
-        write(x, MAIN_Y + 12, "Соглашение: " .. (ui.form.agreed and "ПРИНЯТ" or "НЕ ПРИНЯТ"), ui.form.agreed and C.green or C.gray, C.bg)
-        write(x, MAIN_Y + 13, "Отзыв оставлен: " .. (ui.form.hasFeedback and "ДА" or "НЕТ"), ui.form.hasFeedback and C.green or C.gray, C.bg)
-        addField("banReason", "Причина бана:", ui.form.banReason, x, MAIN_Y + 15, w - 2)
-        addField("banDuration", "Срок, сек:", ui.form.banDuration, x, MAIN_Y + 17, w - 2, { numeric = true })
-        addField("bannedBy", "Администратор:", ui.form.bannedBy, x, MAIN_Y + 19, w - 2)
-        write(x, MAIN_Y + 21, "Статус: " .. (ui.form.banned and "ЗАБЛОКИРОВАН" or "АКТИВЕН"), ui.form.banned and C.red or C.green, C.bg)
-        local y = MAIN_Y + 23
-        addButton("save_user", "[ СОХРАНИТЬ ]", x, y, 18, C.button)
-        addButton(ui.form.banned and "unban_user" or "ban_user", ui.form.banned and "[ РАЗБАНИТЬ ]" or "[ ЗАБАНИТЬ ]", x + 20, y, 18, ui.form.banned and C.button or C.danger)
-    elseif ui.tab == "stats" then
-        write(x, MAIN_Y + 1, "СТАТИСТИКА", C.accent, C.bg)
-        write(x, MAIN_Y + 4, "Покупок: " .. tostring(ui.form.totalBuys or 0), C.white, C.bg)
-        write(x, MAIN_Y + 6, "Продаж:   " .. tostring(ui.form.totalSells or 0), C.white, C.bg)
-        write(x, MAIN_Y + 8, "Оборот:   " .. tostring((ui.form.totalBuys or 0) + (ui.form.totalSells or 0)), C.white, C.bg)
-        write(x, MAIN_Y + 10, "Репортов: " .. tostring(ui.form.totalReports or 0), C.white, C.bg)
-        write(x, MAIN_Y + 12, "Игроков:  " .. tableSize(players), C.white, C.bg)
-    elseif ui.tab == "reports" then
-        write(x, MAIN_Y + 1, "РЕПОРТЫ (ЖАЛОБЫ)", C.accent, C.bg)
-        if e and e.raw then
-            write(x, MAIN_Y + 4, trunc(e.raw, RIGHT_W - 2), C.white, C.bg)
-            addButton("resolve_report", "[ РАЗРЕШИТЬ ]", x, MAIN_Y + 7, 20, C.button)
-        else
-            write(x, MAIN_Y + 4, "Нет жалоб", C.gray, C.bg)
-        end
-    elseif ui.tab == "feedbacks" then
-        write(x, MAIN_Y + 1, "ОТЗЫВЫ", C.accent, C.bg)
-        if e and e.raw then
-            addField("fb_name", "Игрок:", ui.form.name, x, MAIN_Y + 4, w - 2, { readonly = true })
-            addField("fb_text", "Текст:", ui.form.text, x, MAIN_Y + 6, w - 2, { readonly = true })
-            addField("fb_time", "Время:", ui.form.time, x, MAIN_Y + 8, w - 2, { readonly = true })
-            addButton("delete_feedback", "[ УДАЛИТЬ ]", x, MAIN_Y + 11, 20, C.danger)
-        else
-            write(x, MAIN_Y + 4, "Отзывов нет", C.gray, C.bg)
-        end
-    elseif ui.tab == "admins" then
-        write(x, MAIN_Y + 1, "АДМИНИСТРАТОРЫ", C.accent, C.bg)
-        write(x, MAIN_Y + 4, "Главный администратор: " .. ADMIN_NAME, C.white, C.bg)
-        addField("new_admin", "Новый админ (имя):", ui.form.newAdmin or "", x, MAIN_Y + 7, w - 2)
-        local y = MAIN_Y + 10
-        addButton("add_admin", "[ ДОБАВИТЬ ]", x, y, 18, C.button)
-        addButton("remove_admin", "[ УДАЛИТЬ ]", x + 20, y, 18, C.danger)
-    elseif ui.tab == "journal" then
-        write(x, MAIN_Y + 1, "ЖУРНАЛ СОБЫТИЙ", C.accent, C.bg)
-        write(x, MAIN_Y + 4, "Все важные события записываются в консоль.", C.gray, C.bg)
-        write(x, MAIN_Y + 6, "Для просмотра полного журнала используйте", C.gray, C.bg)
-        write(x, MAIN_Y + 7, "команду: cat /home/reports.log", C.gray, C.bg)
-    elseif ui.tab == "storeStatus" then
-        write(x, MAIN_Y + 1, "УПРАВЛЕНИЕ ДОСТУПНОСТЬЮ", C.accent, C.bg)
-        local status = shopPaused and "ЗАКРЫТ" or "ОТКРЫТ"
-        write(x, MAIN_Y + 4, "Текущий статус: " .. status, shopPaused and C.red or C.green, C.bg)
-        addButton("toggle_pause", shopPaused and "[ ОТКРЫТЬ МАГАЗИН ]" or "[ ЗАКРЫТЬ МАГАЗИН ]", x, MAIN_Y + 7, 28, shopPaused and C.button or C.pause)
-    elseif ui.tab == "sync" then
-        write(x, MAIN_Y + 1, "СИНХРОНИЗАЦИЯ КАТАЛОГА", C.accent, C.bg)
-        write(x, MAIN_Y + 4, "Загрузить каталог скупки из удалённого репозитория:", C.gray, C.bg)
-        write(x, MAIN_Y + 5, REMOTE_SHOP_ITEMS_URL, C.cyan, C.bg)
-        addButton("load_remote_catalog", "[ ЗАГРУЗИТЬ С GITHUB ]", x, MAIN_Y + 8, 28, C.button)
-        write(x, MAIN_Y + 11, "Текущий каталог: " .. #sellCatalog .. " товаров", C.gray, C.bg)
-        write(x, MAIN_Y + 13, "Последнее обновление: " .. (sellCatalog[1] and sellCatalog[1].updatedAt or "неизвестно"), C.gray, C.bg)
-        write(x, MAIN_Y + 15, "Нажмите кнопку для загрузки актуального списка", C.gray, C.bg)
-    end
-
-    for i, f in ipairs(ui.fields) do
-        drawField(f, ui.activeField == i)
-    end
-
-    local desc = tabDescriptions[ui.tab]
-    if desc then
-        local lines = wrapText(desc, RIGHT_W - 2)
-        local startY = MAIN_Y + MAIN_H - 2 - #lines + 1
-        for i, line in ipairs(lines) do
-            write(x + 1, startY + i - 1, line, C.gray, C.bg)
-        end
-    end
-end
-
-local function drawHeader()
-    fill(1, 1, WIDTH, TOP, C.header)
-    center(1, "──── PIM MARKET SERVER ────", C.accent, C.header)
-    local x = 2
-    for _, t in ipairs(tabs) do
-        local w = ulen(t.title) + 4
-        local active = ui.tab == t.id
-        fill(x, 3, w, 1, active and C.selected or C.panel)
-        center(3, t.title, active and C.cyan or C.gray, active and C.selected or C.panel, x, w)
-        t.x = x; t.w = w
-        x = x + w + 1
-    end
-    local a = "MODEM: " .. tostring(modem.address)
-    write(math.max(1, WIDTH - ulen(a) - 1), 1, a, C.gray, C.header)
-end
-
-local function drawList(list)
-    fill(1, MAIN_Y, LEFT_W, MAIN_H, C.bg)
-    box(1, MAIN_Y, LEFT_W, MAIN_H, C.line, C.bg)
-    write(3, MAIN_Y + 1, "ПОИСК:", C.gray, C.bg)
-    local sx = 11
-    local sw = LEFT_W - sx - 2
-    fill(sx, MAIN_Y + 1, sw, 1, C.input)
-    write(sx + 1, MAIN_Y + 1, trunc(ui.search, sw - 2), ui.searchFocused and C.cyan or C.white, C.input)
-    ui.rows = {}
-    local max = math.max(0, #list - LIST_H)
-    ui.scroll = math.max(0, math.min(ui.scroll, max))
-    for row = 1, LIST_H do
-        local idx = ui.scroll + row
-        local e = list[idx]
-        local y = LIST_Y + row - 1
-        fill(2, y, LEFT_W - 2, 1, idx == ui.selected and C.selected or C.bg)
-        if e then
-            local fg = idx == ui.selected and C.cyan or C.white
-            write(3, y, trunc(e.title, LEFT_W - 5), fg, idx == ui.selected and C.selected or C.bg)
-            ui.rows[#ui.rows + 1] = { y = y, index = idx }
-        end
-    end
-    local info = "Всего: " .. tostring(#list)
-    write(3, MAIN_Y + MAIN_H - 2, info, C.gray, C.bg)
-end
-
-local function drawBottom()
-    local y = HEIGHT - BOTTOM + 1
-    fill(1, y, WIDTH, BOTTOM, C.header)
-    addButton("back", "< НАЗАД", 2, y + 1, 12, C.button)
-    local info = "Сервер: ONLINE | Порт: 0xffef/0xfffe"
-    write(29, y + 1, trunc(info, WIDTH - 31), C.green, C.header)
-    write(WIDTH - 25, y + 1, "Esc — назад | выберите раздел мышкой", C.gray, C.header)
-    if ui.message ~= "" then write(2, y, trunc(ui.message, WIDTH - 3), ui.messageColor, C.header) end
-end
-
-local function drawAll()
-    clearControls()
-    fill(1, 1, WIDTH, HEIGHT, C.bg)
-    drawHeader()
-    local list = listData()
-    if #list == 0 then ui.selected = 0; ui.scroll = 0 elseif ui.selected <= 0 then ui.selected = 1 elseif ui.selected > #list then ui.selected = #list end
-    drawList(list)
-    local e = selected(list)
-    drawRight(e)
-    drawBottom()
-    ui.lastDraw = computer.uptime()
-    needsRedraw = false
-end
-
-local function reload() loadForm(); ui.activeField = nil; needsRedraw = true; drawAll() end
-
--- 14. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ (с обновлением индексов)
-local function action(id)
-    if id == "back" then
-        ui.tab = "buy"; ui.selected = 1; ui.scroll = 0; ui.search = ""; ui.activeField = nil; reload(); return
-    end
-    if id == "toggle_enabled" then
-        ui.form.enabled = not ui.form.enabled; drawAll(); return
-    end
-    if id == "save_item" then
-        local name = fv("displayName"); local internal = fv("internalName")
-        if name == "" or internal == "" then msg("Название и ID предмета обязательны", C.red); drawAll(); return end
-        local src = getCatalog(ui.tab)
-        local idx = ui.form.sourceIndex
-        local item = {
-            displayName = name,
-            internalName = internal,
-            damage = math.floor(num(fv("damage"), 0)),
-            priceCoin = num(fv("priceCoin"), 0),
-            priceEma = num(fv("priceEma"), 0),
-            article = fv("article"),
-            enabled = ui.form.enabled,
-            maxQty = math.floor(num(fv("maxQty"), 0))
-        }
-        if idx and src[idx] then
-            src[idx] = item
-        else
-            table.insert(src, item)
-        end
-        if ui.tab == "sell" then rebuildSellIndex() else rebuildBuyIndex() end
-        saveCatalog()
-        msg("Товар сохранён", C.green)
-        ui.selected = 1; reload(); return
-    end
-    if id == "new_item" then
-        ui.form = { displayName = "", internalName = "", damage = "0", priceCoin = "0", priceEma = "0", article = "", enabled = true, maxQty = "0", sourceIndex = nil }
-        ui.activeField = nil; drawAll(); return
-    end
-    if id == "delete_item" then
-        local src = getCatalog(ui.tab)
-        local idx = ui.form.sourceIndex
-        if not idx or not src[idx] then msg("Товар не выбран", C.red); drawAll(); return end
-        table.remove(src, idx)
-        if ui.tab == "sell" then rebuildSellIndex() else rebuildBuyIndex() end
-        saveCatalog()
-        msg("Товар удалён", C.yellow)
-        ui.selected = math.max(1, ui.selected - 1); reload(); return
-    end
-    if id == "save_user" then
-        local name = fv("name")
-        if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
-        local player = players[name]
-        if not player then msg("Игрок не найден", C.red); drawAll(); return end
-        player.balance = num(fv("balance"), player.balance)
-        player.banReason = fv("banReason")
-        player.banDuration = math.max(0, math.floor(num(fv("banDuration"), 0)))
-        player.bannedBy = fv("bannedBy")
-        savePlayers()
-        broadcast("user_updated", { player = name, balance = player.balance })
-        msg("Данные игрока сохранены", C.green); reload(); return
-    end
-    if id == "ban_user" then
-        local name = fv("name")
-        if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
-        local player = players[name]
-        if not player then msg("Игрок не найден", C.red); drawAll(); return end
-        player.banned = true
-        player.banReason = fv("banReason") ~= "" and fv("banReason") or "Нарушение правил"
-        player.banDuration = math.max(0, math.floor(num(fv("banDuration"), 0)))
-        player.bannedBy = fv("bannedBy") ~= "" and fv("bannedBy") or ADMIN_NAME
-        player.bannedAt = stamp()
-        savePlayers()
-        broadcast("user_updated", { player = name, banned = true })
-        msg("Игрок заблокирован", C.red); reload(); return
-    end
-    if id == "unban_user" then
-        local name = fv("name")
-        if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
-        local player = players[name]
-        if not player then msg("Игрок не найден", C.red); drawAll(); return end
-        player.banned = false
-        player.banReason = nil; player.banDuration = 0; player.bannedBy = nil; player.bannedAt = nil
-        savePlayers()
-        broadcast("user_updated", { player = name, banned = false })
-        msg("Игрок разблокирован", C.green); reload(); return
-    end
-    if id == "resolve_report" then
-        local e = selected(listData())
-        if e and e.raw then
-            local oldContent = ""
-            local file = io.open(REPORTS_LOG, "r")
-            if file then oldContent = file:read("*a"); file:close() end
-            local lines = {}
-            for line in oldContent:gmatch("[^\n]+") do
-                if line ~= e.raw then table.insert(lines, line) end
-            end
-            file = io.open(REPORTS_LOG, "w")
-            if file then file:write(table.concat(lines, "\n")); file:close() end
-            msg("Репорт разрешён", C.green); reload()
-        else msg("Репорт не выбран", C.red); drawAll() end
-        return
-    end
-    if id == "delete_feedback" then
-        local idx = 0
-        for i, f in ipairs(feedbacks) do
-            if f.name == ui.form.name and f.text == ui.form.text and f.time == ui.form.time then idx = i; break end
-        end
-        if idx > 0 then table.remove(feedbacks, idx); saveFeedbacks(); msg("Отзыв удалён", C.green); reload()
-        else msg("Отзыв не найден", C.red); drawAll() end
-        return
-    end
-    if id == "add_admin" then
-        local newAdmin = fv("new_admin")
-        if newAdmin and newAdmin ~= "" then msg("Администратор " .. newAdmin .. " добавлен (демо)", C.green); reload()
-        else msg("Введите имя", C.red); drawAll() end
-        return
-    end
-    if id == "remove_admin" then
-        local adminName = fv("new_admin")
-        if adminName and adminName ~= "" and adminName ~= ADMIN_NAME then
-            msg("Администратор " .. adminName .. " удалён (демо)", C.yellow); reload()
-        else msg("Нельзя удалить главного админа или введите имя", C.red); drawAll() end
-        return
-    end
-    if id == "toggle_pause" then
-        shopPaused = not shopPaused
-        msg(shopPaused and "Магазин закрыт" or "Магазин открыт", shopPaused and C.red or C.green); reload(); return
-    end
-    if id == "load_remote_catalog" then
-        if loadRemoteSellItems() then
-            msg("Каталог успешно загружен из удалённого репозитория", C.green); reload()
-        else
-            msg("Ошибка загрузки каталога, проверьте интернет-соединение", C.red); drawAll()
-        end
-        return
-    end
-end
-
--- 15. ОБРАБОТКА СОБЫТИЙ ВВОДА/МЫШИ
-local function inside(x, y, c) return y == c.y and x >= c.x and x < c.x + c.w end
-local function touch(x, y)
-    for _, t in ipairs(tabs) do
-        if y == 3 and x >= t.x and x < t.x + t.w then
-            ui.tab = t.id; ui.selected = 1; ui.scroll = 0; ui.search = ""; ui.searchFocused = false; loadForm(); drawAll(); return
-        end
-    end
-    if y == MAIN_Y + 1 and x >= 11 and x < LEFT_W - 1 then
-        ui.searchFocused = true; ui.activeField = nil; drawAll(); return
-    end
-    for _, r in ipairs(ui.rows) do
-        if y == r.y and x >= 2 and x <= LEFT_W then
-            ui.selected = r.index; ui.searchFocused = false; loadForm(); drawAll(); return
-        end
-    end
-    for i, f in ipairs(ui.fields) do
-        local ix = f.x + 15; local iw = math.max(8, f.w - 15)
-        if y == f.y and x >= ix and x < ix + iw and not f.readonly then
-            ui.activeField = i; ui.searchFocused = false; drawAll(); return
-        end
-    end
-    for _, b in ipairs(ui.buttons) do
-        if inside(x, y, b) then ui.activeField = nil; ui.searchFocused = false; action(b.id); return end
-    end
-    ui.activeField = nil; ui.searchFocused = false; drawAll()
-end
-
-local function scroll(direction)
-    local list = listData()
-    local max = math.max(0, #list - LIST_H)
-    ui.scroll = math.max(0, math.min(max, ui.scroll - direction * 3))
-    if ui.selected < ui.scroll + 1 then ui.selected = ui.scroll + 1 end
-    if ui.selected > ui.scroll + LIST_H then ui.selected = ui.scroll + LIST_H end
-    drawAll()
-end
-
-local function key(char, code)
-    if code == keyboard.keys.escape then ui.activeField = nil; ui.searchFocused = false; drawAll(); return end
-    if ui.searchFocused then
-        if code == keyboard.keys.back then
-            ui.search = usub(ui.search, 1, -2)
-        elseif code == keyboard.keys.enter or code == keyboard.keys.tab then
-            ui.searchFocused = false
-        elseif char and char >= 32 then
-            ui.search = ui.search .. unicode.char(char)
-        end
-        ui.selected = 1; ui.scroll = 0; loadForm(); drawAll(); return
-    end
-    local f = ui.activeField and ui.fields[ui.activeField]
-    if f and not f.readonly then
-        if code == keyboard.keys.back then
-            f.value = usub(f.value, 1, -2)
-        elseif code == keyboard.keys.enter or code == keyboard.keys.tab then
-            ui.activeField = nil
-        elseif char and char >= 32 then
-            local ch = unicode.char(char)
-            if not f.numeric or ch:match("[%d%.,%-]") then f.value = f.value .. ch end
-        end
-        if f.id == "displayName" or f.id == "internalName" or f.id == "damage" or f.id == "priceCoin" or f.id == "priceEma" or f.id == "article" or f.id == "maxQty" then
-            ui.form[f.id] = f.value
-        elseif f.id == "name" or f.id == "balance" or f.id == "transactions" or f.id == "banReason" or f.id == "banDuration" or f.id == "bannedBy" or f.id == "new_admin" then
-            ui.form[f.id] = f.value
-        end
-        drawAll(); return
-    end
-    if code == keyboard.keys.up then
-        ui.selected = math.max(1, ui.selected - 1)
-        if ui.selected <= ui.scroll then ui.scroll = math.max(0, ui.selected - 1) end
-        loadForm(); drawAll()
-    elseif code == keyboard.keys.down then
-        local list = listData()
-        ui.selected = math.min(#list, ui.selected + 1)
-        if ui.selected > ui.scroll + LIST_H then ui.scroll = ui.selected - LIST_H end
-        loadForm(); drawAll()
-    end
-end
-
--- 16. ЗАПУСК
-loadForm()
-drawAll()
-
+loadForm()drawAll()
 while true do
-    local ev = { event.pull(0.5) }
-    local name = ev[1]
-    if name == "modem_message" then
-        local from = ev[3]
-        local port = ev[4]
-        local raw = ev[6]
-        if port == 0xffef or port == 0xfffe then
-            local ok, msg = pcall(serialization.unserialize, raw)
-            if ok and type(msg) == "table" then
-                handleOldRequest(from, port, msg)
-            end
-        end
-    elseif name == "touch" then
-        touch(ev[3], ev[4])
-    elseif name == "scroll" then
-        scroll(ev[5] or 0)
-    elseif name == "key_down" then
-        key(ev[3], ev[4])
-    elseif name == "interrupted" then
-        flushSaves()
-        term.clear()
-        print("PIM MARKET SERVER остановлен")
-        break
-    end
-    if needsRedraw then
-        drawAll()
-    end
+ local ev={event.pull(0.25)}local name=ev[1]
+ if name=="modem_message"then local address,port,protocol,kind,keyValue=ev[3],ev[4],ev[6],ev[7],ev[8]if port==SERVER_PORT and protocol==PROTOCOL and keyValue==NETWORK_KEY then if kind=="discover"then modem.send(address,num(ev[10],CLIENT_PORT),PROTOCOL,"discover_reply",NETWORK_KEY,tostring(ev[9] or""),modem.address,SERVER_PORT,CLIENT_PORT)elseif kind=="request"then local requestId=tostring(ev[9] or"")local replyPort=math.floor(num(ev[10],CLIENT_PORT))local ok,payload=pcall(serialization.unserialize,tostring(ev[11] or""))local response if not ok or type(payload)~="table"then response={status="error",message="Повреждённый запрос"}else local handled,result=pcall(handle,address,payload)response=handled and result or{status="error",message="Ошибка сервера: "..tostring(result)}end sendChunks(address,replyPort,requestId,response)end end
+ elseif name=="touch"then touch(ev[3],ev[4])
+ elseif name=="scroll"then scroll(ev[5]or 0)
+ elseif name=="key_down"then key(ev[3],ev[4])
+ elseif name=="interrupted"then term.clear()print("VIP-SHOP MODEM SERVER остановлен")print("Modem ID: "..tostring(modem.address))print("Порт: "..SERVER_PORT)break end
+ local changed=false local now=computer.uptime()for _,t in pairs(state.terminals)do local online=now-num(t.lastSeen,0)<=OFFLINE_AFTER if t.online~=online then t.online=online changed=true end end if changed or now-ui.lastDraw>2 then drawAll()end
 end
