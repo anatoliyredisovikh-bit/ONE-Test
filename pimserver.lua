@@ -1,13 +1,13 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – версия 7.6
--- ГАРАНТИРОВАННО РАБОЧАЯ ЗАГРУЗКА DOUBLEBUFFERING
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.9
+-- Исправлены баги: мерцание, синхронизация, откат баланса, остаток при продаже
 -- ============================================================
 
 local component = require("component")
 local event = require("event")
 local keyboard = require("keyboard")
 local unicode = require("unicode")
-local computer = require("computer")  -- <-- ОБЯЗАТЕЛЬНО
+local computer = require("computer")
 local serialization = require("serialization")
 local filesystem = require("filesystem")
 local term = require("term")
@@ -19,102 +19,6 @@ if not component.isAvailable("gpu") then error("Не найдена видеок
 
 local modem = component.modem
 local gpu = component.gpu
-
--- ------------------------------------------------------------------
--- 0. ГАРАНТИРОВАННАЯ ЗАГРУЗКА DOUBLEBUFFERING
--- ------------------------------------------------------------------
-local buffer = nil
-
--- Пытаемся загрузить через require
-local ok, mod = pcall(require, "DoubleBuffering")
-if ok and mod then buffer = mod end
-if not buffer then
-    ok, mod = pcall(require, "doubleBuffering")
-    if ok and mod then buffer = mod end
-end
-
--- Если не загрузилось – пробуем через dofile
-if not buffer then
-    local paths = {
-        "/lib/DoubleBuffering.lua",
-        "/lib/doubleBuffering.lua",
-        "/usr/lib/DoubleBuffering.lua",
-        "/usr/lib/doubleBuffering.lua",
-        "/home/DoubleBuffering.lua",
-        "/home/doubleBuffering.lua"
-    }
-    for _, p in ipairs(paths) do
-        if filesystem.exists(p) then
-            local ok, mod = pcall(dofile, p)
-            if ok and mod then
-                buffer = mod
-                break
-            end
-        end
-    end
-end
-
--- Если всё ещё нет – пытаемся скачать
-if not buffer then
-    print("⚠️ DoubleBuffering не найдена. Пытаюсь установить...")
-    
-    local has_wget = pcall(os.execute, "which wget")
-    local internet_ok = component.isAvailable("internet")
-    
-    if not has_wget and not internet_ok then
-        print("❌ Нет wget и интернета. Установите вручную:")
-        print("   pastebin run vTM8nbSZ")
-        print("Или скачайте файл вручную:")
-        print("  wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua /lib/DoubleBuffering.lua")
-        print("Нажмите любую клавишу для выхода...")
-        -- Безопасное ожидание
-        if computer and computer.pullEvent then
-            computer.pullEvent("key_down")
-        else
-            event.pull("key_down")
-        end
-        os.exit()
-    end
-    
-    if not filesystem.exists("/lib") then
-        filesystem.makeDirectory("/lib")
-    end
-    
-    local dbPath = "/lib/DoubleBuffering.lua"
-    if not filesystem.exists(dbPath) then
-        print("⬇️ Загрузка DoubleBuffering ...")
-        local command = "wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua " .. dbPath
-        os.execute(command)
-    end
-    
-    if filesystem.exists(dbPath) then
-        local ok, mod = pcall(dofile, dbPath)
-        if ok and mod then
-            buffer = mod
-            print("✅ DoubleBuffering загружена")
-        end
-    end
-end
-
-if not buffer then
-    print("❌ Не удалось загрузить DoubleBuffering.")
-    print("Скачайте вручную командой:")
-    print("  wget -f https://raw.githubusercontent.com/IgorTimofeev/DoubleBuffering/master/DoubleBuffering.lua /lib/DoubleBuffering.lua")
-    print("Нажмите любую клавишу для выхода...")
-    if computer and computer.pullEvent then
-        computer.pullEvent("key_down")
-    else
-        event.pull("key_down")
-    end
-    os.exit()
-end
-
-print("✅ DoubleBuffering успешно загружена!")
-
-pcall(require, "advancedLua")
-pcall(require, "color")
-pcall(require, "image")
-pcall(require, "OCIF")
 
 -- ------------------------------------------------------------------
 -- 1. КОНФИГУРАЦИЯ
@@ -157,6 +61,7 @@ local function trunc(v, w)
     return w <= 1 and usub(v, 1, w) or usub(v, 1, w - 1) .. "…"
 end
 
+-- Функция разбивки текста на строки по ширине (с учётом unicode)
 local function wrapText(text, maxLen)
     local lines = {}
     local current = ""
@@ -185,6 +90,9 @@ local sessions = {}
 local owner = nil
 local markets = {}
 local shopPaused = false
+
+-- Флаг для перерисовки (чтобы не мерцало)
+local needsRedraw = false
 
 -- ------------------------------------------------------------------
 -- 4. ФУНКЦИЯ ЛОГИРОВАНИЯ
@@ -377,6 +285,7 @@ local function loadRemoteSellItems()
         content = content .. chunk
     end
 
+    -- Сохраняем временный файл
     local tmpFile = "/tmp/remote_shop_items.lua"
     local f = io.open(tmpFile, "w")
     if not f then
@@ -386,6 +295,7 @@ local function loadRemoteSellItems()
     f:write(content)
     f:close()
 
+    -- Загружаем данные из временного файла
     local ok, data = pcall(dofile, tmpFile)
     if not ok or type(data) ~= "table" or type(data.sellItems) ~= "table" then
         logEvent("❌ Неверный формат удалённого файла")
@@ -393,6 +303,7 @@ local function loadRemoteSellItems()
         return false
     end
 
+    -- Преобразуем данные в формат sellCatalog
     local newCatalog = {}
     for _, item in ipairs(data.sellItems) do
         table.insert(newCatalog, {
@@ -419,6 +330,7 @@ end
 -- ------------------------------------------------------------------
 if #sellCatalog == 0 then
     if not importSellItemsFromFile() then
+        -- Пробуем загрузить из удалённого репозитория
         if not loadRemoteSellItems() then
             sellCatalog = {
                 { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true, maxQty = 0 },
@@ -548,8 +460,9 @@ local function handleOldRequest(from, port, msg)
         local player = players[msg.name]
         if not player or player.banned then return end
         local value = tonumber(msg.value) or 0
-        local qtySold = tonumber(msg.qty) or 0
         
+        -- ★★★ УМЕНЬШАЕМ ОСТАТОК ТОВАРА В КАТАЛОГЕ ★★★
+        local qtySold = tonumber(msg.qty) or 0
         if qtySold > 0 then
             for i, item in ipairs(sellCatalog) do
                 if item.internalName == msg.internalName and item.damage == (tonumber(msg.damage) or 0) then
@@ -758,7 +671,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 10. АДМИН-ПАНЕЛЬ (С ИСПРАВЛЕННЫМИ КНОПКАМИ)
+-- 10. АДМИН-ПАНЕЛЬ
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -766,10 +679,6 @@ if maxW and maxH and (WIDTH < maxW or HEIGHT < maxH) then
     gpu.setResolution(maxW, maxH)
     WIDTH, HEIGHT = gpu.getResolution()
 end
-
-buffer.bindGPU(gpu)
-buffer.setResolution(WIDTH, HEIGHT)
-buffer.setBackground(0x0C0C0C)
 
 local C = {
     bg = 0x0C0C0C, panel = 0x11191D, header = 0x0A0A0A, line = 0x27BDEC,
@@ -795,71 +704,33 @@ local tabDescriptions = {
     sync = "Загрузка каталога скупки из внешнего репозитория GitHub. Обновляет список товаров для скупки."
 }
 
--- ------------------------------------------------------------------
--- 10.2 БУФЕРИЗИРОВАННЫЕ ФУНКЦИИ РИСОВАНИЯ
--- ------------------------------------------------------------------
 local function fill(x, y, w, h, bg, ch)
     if w <= 0 or h <= 0 then return end
-    buffer.drawRectangle(x, y, w, h, bg or C.bg, bg or C.bg, ch or " ")
+    gpu.setBackground(bg or C.bg); gpu.fill(x, y, w, h, ch or " ")
 end
-
 local function write(x, y, v, fg, bg)
     if y < 1 or y > HEIGHT or x > WIDTH then return end
-    v = tostring(v or "")
-    if x < 1 then v = usub(v, 2 - x); x = 1 end
+    v = tostring(v or ""); if x < 1 then v = usub(v, 2 - x); x = 1 end
     if v == "" then return end
-    buffer.text(x, y, fg or C.white, bg or C.bg, trunc(v, WIDTH - x + 1))
+    gpu.setForeground(fg or C.white); gpu.setBackground(bg or C.bg)
+    gpu.set(x, y, trunc(v, WIDTH - x + 1))
 end
-
 local function centerX(v, left, w)
     left = left or 1; w = w or WIDTH
     return left + math.max(0, math.floor((w - ulen(v)) / 2))
 end
-
 local function center(y, v, fg, bg, left, w)
     write(centerX(v, left, w), y, v, fg, bg)
 end
-
 local function box(x, y, w, h, fg, bg)
     if w < 2 or h < 2 then return end
     fg = fg or C.line; bg = bg or C.bg
     write(x, y, "┌" .. string.rep("─", w - 2) .. "┐", fg, bg)
-    write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
     for r = y + 1, y + h - 2 do
         write(x, r, "│", fg, bg)
         write(x + w - 1, r, "│", fg, bg)
     end
-end
-
-local function drawButton(btn)
-    if not btn then return end
-    if not btn.xs or not btn.ys then
-        return
-    end
-    fill(btn.x, btn.y, btn.xs, btn.ys, btn.bg)
-    local textX = btn.x + math.floor((btn.xs - unicode.len(btn.text)) / 2)
-    local textY = btn.y + math.floor((btn.ys - 1) / 2)
-    write(textX, textY, btn.text, btn.fg, btn.bg)
-end
-
-local function addButton(id, label, x, y, w, bg, fg)
-    local b = {
-        id = id,
-        label = label,
-        x = x,
-        y = y,
-        xs = w or 0,
-        ys = 1,
-        bg = bg or C.button,
-        fg = fg or C.white
-    }
-    ui.buttons[#ui.buttons + 1] = b
-    drawButton(b)
-    return b
-end
-
-local function drawFlexButton(btn)
-    drawButton(btn)
+    write(x, y + h - 1, "└" .. string.rep("─", w - 2) .. "┘", fg, bg)
 end
 
 local ui = {
@@ -903,14 +774,19 @@ local LIST_H = MAIN_H - 4
 
 local function msg(v, c) ui.message = tostring(v or ""); ui.messageColor = c or C.white end
 local function clearControls() ui.fields = {}; ui.buttons = {}; ui.rows = {} end
-
 local function addField(id, label, value, x, y, w, opt)
     opt = opt or {}
     local f = { id = id, label = label, value = tostring(value or ""), x = x, y = y, w = w, numeric = opt.numeric == true, readonly = opt.readonly == true }
     ui.fields[#ui.fields + 1] = f
     return f
 end
-
+local function addButton(id, label, x, y, w, bg, fg)
+    local b = { id = id, label = label, x = x, y = y, w = w, bg = bg or C.button, fg = fg or C.white }
+    ui.buttons[#ui.buttons + 1] = b
+    fill(x, y, w, 1, b.bg)
+    center(y, label, b.fg, b.bg, x, w)
+    return b
+end
 local function fby(id) for _, f in ipairs(ui.fields) do if f.id == id then return f end end end
 local function fv(id) local f = fby(id); return f and f.value or "" end
 local function drawField(f, focus)
@@ -927,6 +803,7 @@ end
 local function setCatalog(tab, catalog)
     if tab == "buy" then buyCatalog = catalog else sellCatalog = catalog end
     saveCatalog()
+    needsRedraw = true
 end
 
 local function listData()
@@ -1142,6 +1019,7 @@ local function drawRight(e)
         drawField(f, ui.activeField == i)
     end
 
+    -- Вывод описания внизу правой панели с переносом на несколько строк
     local desc = tabDescriptions[ui.tab]
     if desc then
         local lines = wrapText(desc, RIGHT_W - 2)
@@ -1205,8 +1083,8 @@ local function drawBottom()
 end
 
 local function drawAll()
-    buffer.clear(1, 1, WIDTH, HEIGHT, C.bg)
     clearControls()
+    fill(1, 1, WIDTH, HEIGHT, C.bg)
     drawHeader()
     local list = listData()
     if #list == 0 then ui.selected = 0; ui.scroll = 0 elseif ui.selected <= 0 then ui.selected = 1 elseif ui.selected > #list then ui.selected = #list end
@@ -1215,14 +1093,10 @@ local function drawAll()
     drawRight(e)
     drawBottom()
     ui.lastDraw = computer.uptime()
-    buffer.drawChanges()
+    needsRedraw = false
 end
 
-local function reload()
-    loadForm()
-    ui.activeField = nil
-    drawAll()
-end
+local function reload() loadForm(); ui.activeField = nil; needsRedraw = true; drawAll() end
 
 -- ------------------------------------------------------------------
 -- 11. ОБРАБОТЧИКИ ДЕЙСТВИЙ АДМИН-ПАНЕЛИ
@@ -1304,11 +1178,13 @@ local function action(id)
         if name == "" then msg("Имя игрока обязательно", C.red); drawAll(); return end
         local player = players[name]
         if not player then msg("Игрок не найден", C.red); drawAll(); return end
+        local oldBalance = player.balance
         player.balance = num(fv("balance"), player.balance)
         player.banReason = fv("banReason")
         player.banDuration = math.max(0, math.floor(num(fv("banDuration"), 0)))
         player.bannedBy = fv("bannedBy")
         savePlayers()
+        -- ★★★ РАССЫЛАЕМ ОБНОВЛЕНИЕ БАЛАНСА ТЕРМИНАЛАМ ★★★
         broadcast("user_updated", { player = name, balance = player.balance })
         msg("Данные игрока сохранены, баланс обновлён", C.green)
         reload()
@@ -1552,5 +1428,10 @@ while true do
         print("Modem ID: " .. tostring(modem.address))
         print("Порты: 0xffef, 0xfffe")
         break
+    end
+
+    -- ★★★ ПЕРЕРИСОВКА ТОЛЬКО ПРИ НЕОБХОДИМОСТИ ★★★
+    if needsRedraw then
+        drawAll()
     end
 end
