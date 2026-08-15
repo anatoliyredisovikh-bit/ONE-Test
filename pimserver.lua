@@ -1,6 +1,6 @@
 -- ============================================================
--- PIM MARKET SERVER (UNIFIED) – полная версия 6.5
--- Автоматическая синхронизация каталога с терминалами
+-- PIM MARKET SERVER (UNIFIED) – полная версия 6.6
+-- Добавлена загрузка каталога скупки из удалённого файла
 -- ============================================================
 
 local component = require("component")
@@ -34,6 +34,7 @@ local FEEDBACKS_PATH = "/home/feedbacks.db"
 local REPORTS_LOG = "/home/reports.log"
 local CATALOG_PATH = "/home/catalog.db"
 local SHOP_ITEMS_FILE = "/home/shop_items.lua"
+local REMOTE_SHOP_ITEMS_URL = "https://raw.githubusercontent.com/anatoliyredisovikh-bit/ONE-Test/refs/heads/main/shop_items.lua"
 
 -- ------------------------------------------------------------------
 -- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -202,6 +203,9 @@ if filesystem.exists(CATALOG_PATH) then
     end
 end
 
+-- ------------------------------------------------------------------
+-- 7.1 ЗАГРУЗКА ИЗ ЛОКАЛЬНОГО ФАЙЛА shop_items.lua
+-- ------------------------------------------------------------------
 local function importSellItemsFromFile()
     if not filesystem.exists(SHOP_ITEMS_FILE) then
         return false
@@ -235,12 +239,85 @@ local function importSellItemsFromFile()
     return true
 end
 
+-- ------------------------------------------------------------------
+-- 7.2 ЗАГРУЗКА ИЗ УДАЛЁННОГО РЕПОЗИТОРИЯ
+-- ------------------------------------------------------------------
+local function loadRemoteSellItems()
+    if not component.isAvailable("internet") then
+        logEvent("⚠️ Интернет-карта не установлена, удалённая загрузка недоступна")
+        return false
+    end
+
+    local internet = require("internet")
+    local ok, response = pcall(function()
+        return internet.request(REMOTE_SHOP_ITEMS_URL, nil, {
+            ["Connection"] = "close",
+            ["Timeout"] = 5
+        })
+    end)
+
+    if not ok or not response then
+        logEvent("❌ Не удалось подключиться к удалённому файлу")
+        return false
+    end
+
+    local content = ""
+    for chunk in response do
+        content = content .. chunk
+    end
+
+    -- Сохраняем временный файл
+    local tmpFile = "/tmp/remote_shop_items.lua"
+    local f = io.open(tmpFile, "w")
+    if not f then
+        logEvent("❌ Не удалось создать временный файл")
+        return false
+    end
+    f:write(content)
+    f:close()
+
+    -- Загружаем данные из временного файла
+    local ok, data = pcall(dofile, tmpFile)
+    if not ok or type(data) ~= "table" or type(data.sellItems) ~= "table" then
+        logEvent("❌ Неверный формат удалённого файла")
+        pcall(filesystem.remove, tmpFile)
+        return false
+    end
+
+    -- Преобразуем данные в формат sellCatalog
+    local newCatalog = {}
+    for _, item in ipairs(data.sellItems) do
+        table.insert(newCatalog, {
+            displayName = item.displayName or "",
+            internalName = item.internalName or "",
+            damage = item.damage or 0,
+            priceCoin = item.price or 0,
+            priceEma = 0,
+            article = tostring(item.internalName):sub(1, 10),
+            enabled = true,
+            maxQty = item.qty or 0,
+        })
+    end
+
+    sellCatalog = newCatalog
+    saveCatalog()
+    logEvent("✅ Загружен каталог скупки из удалённого файла, позиций: " .. #sellCatalog)
+    pcall(filesystem.remove, tmpFile)
+    return true
+end
+
+-- ------------------------------------------------------------------
+-- 7.3 ИНИЦИАЛИЗАЦИЯ КАТАЛОГА
+-- ------------------------------------------------------------------
 if #sellCatalog == 0 then
     if not importSellItemsFromFile() then
-        sellCatalog = {
-            { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true, maxQty = 0 },
-        }
-        saveCatalog()
+        -- Пробуем загрузить из удалённого репозитория
+        if not loadRemoteSellItems() then
+            sellCatalog = {
+                { displayName = "Железный слиток", internalName = "minecraft:iron_ingot", damage = 0, priceCoin = 1, priceEma = 0, article = "#SELL-001", enabled = true, maxQty = 0 },
+            }
+            saveCatalog()
+        end
     end
 end
 if #buyCatalog == 0 then
@@ -560,7 +637,7 @@ local function handleOldRequest(from, port, msg)
 end
 
 -- ------------------------------------------------------------------
--- 10. АДМИН-ПАНЕЛЬ (полный код)
+-- 10. АДМИН-ПАНЕЛЬ
 -- ------------------------------------------------------------------
 local WIDTH, HEIGHT = gpu.getResolution()
 local maxW, maxH = gpu.maxResolution()
@@ -632,6 +709,7 @@ local tabs = {
     { id = "admins", title = "АДМИНИСТРАТОРЫ" },
     { id = "journal", title = "ЖУРНАЛ" },
     { id = "storeStatus", title = "ПРИОСТАНОВИТЬ МАГАЗИН" },
+    { id = "sync", title = "СИНХРОНИЗАЦИЯ" },  -- НОВАЯ ВКЛАДКА
 }
 
 local TOP = 4
@@ -728,6 +806,8 @@ local function listData()
         r = { { title = "Журнал событий", sub = "В разработке", raw = {} } }
     elseif ui.tab == "storeStatus" then
         r = { { title = "Статус магазина", sub = shopPaused and "ПРИОСТАНОВЛЕН" or "АКТИВЕН", raw = { paused = shopPaused } } }
+    elseif ui.tab == "sync" then
+        r = { { title = "Синхронизация каталога", sub = "Загрузить из удалённого репозитория", raw = {} } }
     end
     return r
 end
@@ -781,6 +861,8 @@ local function loadForm()
         ui.form = { journal = "Журнал событий (можно расширить)" }
     elseif ui.tab == "storeStatus" then
         ui.form = { paused = shopPaused }
+    elseif ui.tab == "sync" then
+        ui.form = { remoteUrl = REMOTE_SHOP_ITEMS_URL }
     end
 end
 
@@ -868,6 +950,14 @@ local function drawRight(e)
         local status = shopPaused and "ЗАКРЫТ" or "ОТКРЫТ"
         write(x, MAIN_Y + 4, "Текущий статус: " .. status, shopPaused and C.red or C.green, C.bg)
         addButton("toggle_pause", shopPaused and "[ ОТКРЫТЬ МАГАЗИН ]" or "[ ЗАКРЫТЬ МАГАЗИН ]", x, MAIN_Y + 7, 28, shopPaused and C.button or C.pause)
+    elseif ui.tab == "sync" then
+        write(x, MAIN_Y + 1, "СИНХРОНИЗАЦИЯ КАТАЛОГА", C.accent, C.bg)
+        write(x, MAIN_Y + 4, "Загрузить каталог скупки из удалённого репозитория:", C.gray, C.bg)
+        write(x, MAIN_Y + 5, REMOTE_SHOP_ITEMS_URL, C.cyan, C.bg)
+        addButton("load_remote_catalog", "[ ЗАГРУЗИТЬ С GITHUB ]", x, MAIN_Y + 8, 28, C.button)
+        write(x, MAIN_Y + 11, "Текущий каталог: " .. #sellCatalog .. " товаров", C.gray, C.bg)
+        write(x, MAIN_Y + 13, "Последнее обновление: " .. (sellCatalog[1] and sellCatalog[1].updatedAt or "неизвестно"), C.gray, C.bg)
+        write(x, MAIN_Y + 15, "Нажмите кнопку для загрузки актуального списка", C.gray, C.bg)
     end
 
     for i, f in ipairs(ui.fields) do
@@ -1138,6 +1228,19 @@ local function action(id)
         shopPaused = not shopPaused
         msg(shopPaused and "Магазин закрыт" or "Магазин открыт", shopPaused and C.red or C.green)
         reload()
+        return
+    end
+
+    -- НОВЫЙ ОБРАБОТЧИК ДЛЯ ЗАГРУЗКИ УДАЛЁННОГО КАТАЛОГА
+    if id == "load_remote_catalog" then
+        local success = loadRemoteSellItems()
+        if success then
+            msg("Каталог успешно загружен из удалённого репозитория", C.green)
+            reload()
+        else
+            msg("Ошибка загрузки каталога, проверьте интернет-соединение", C.red)
+            drawAll()
+        end
         return
     end
 end
