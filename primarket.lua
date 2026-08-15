@@ -1,6 +1,6 @@
 -- ============================================================
 -- VIPCLIENT – клиент для VIP-SHOP MODEM SERVER
--- Версия 6.0 (полностью рабочая, без синтаксических ошибок)
+-- Версия 6.0 (переписан с нуля, без синтаксических ошибок)
 -- ============================================================
 
 local component = require("component")
@@ -20,14 +20,14 @@ local modem = component.modem
 local gpu = component.gpu
 
 -- ============================================================
---  АДРЕС СЕРВЕРА (фиксированный)
+--  КОНСТАНТЫ И АДРЕС СЕРВЕРА
 -- ============================================================
 local SERVER_ADDRESS = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
 if fs.exists("/home/server_address.dat") then
-    local file = io.open("/home/server_address.dat", "r")
-    if file then
-        local addr = file:read("*a")
-        file:close()
+    local f = io.open("/home/server_address.dat", "r")
+    if f then
+        local addr = f:read("*a")
+        f:close()
         if addr and addr ~= "" then
             SERVER_ADDRESS = addr:gsub("%s+", "")
         end
@@ -45,15 +45,13 @@ local pendingRequests = {}
 
 local function writeDebugLog(msg)
     pcall(function()
-        local file = io.open("/home/vipclient_debug.log", "a")
-        if file then
-            file:write("[" .. os.date("%H:%M:%S") .. "] " .. tostring(msg) .. "\n")
-            file:close()
+        local f = io.open("/home/vipclient_debug.log", "a")
+        if f then
+            f:write("[" .. os.date("%H:%M:%S") .. "] " .. tostring(msg) .. "\n")
+            f:close()
         end
     end)
 end
-
-local function discoverServer() return true end
 
 local function sendRequest(action, payload, callback)
     if not serverAddress then
@@ -94,7 +92,7 @@ end
 
 local function processChunk(requestId, chunk, total, index)
     local req = pendingRequests[requestId]
-    if not req or req.completed then return end
+    if not req or req.completed then return
 
     req.chunks[index] = chunk
     req.total = total
@@ -105,12 +103,12 @@ local function processChunk(requestId, chunk, total, index)
         local ok, response = pcall(serialization.unserialize, full)
         req.completed = true
         pendingRequests[requestId] = nil
-        if req.timer then event.cancel(req.timer) end
+        if req.timer then event.cancel(req.timer)
 
         if ok and type(response) == "table" then
-            if req.callback then req.callback(response) end
+            if req.callback then req.callback(response)
         else
-            if req.callback then req.callback({status="error", message="Повреждённый ответ"}) end
+            if req.callback then req.callback({status="error", message="Повреждённый ответ"})
         end
     end
 end
@@ -184,8 +182,7 @@ local shopPaused = false
 local buyCatalog = {}
 local sellCatalog = {}
 local catalogMode = "buy"
-local buyVersion = 0
-local sellVersion = 0
+local allItems = {}
 
 -- UI
 local WIDTH, HEIGHT = gpu.getResolution()
@@ -245,7 +242,7 @@ local function formatQuantity(value)
     return tostring(math.floor(n))
 end
 local function sortableName(name)
-    if not name then return "" end
+    if not name then return ""
     local lower = string.lower(name)
     local result = lower:gsub("(%d+)", function(d) return string.format("%08d", tonumber(d)) end)
     return result
@@ -277,7 +274,6 @@ local BTN_Y = TOTAL_Y + 2
 local ACC_Y = BTN_Y + 3
 local BOT_Y = HEIGHT - 2
 
-local allItems = {}
 local items = {}
 local selectedIndex = 1
 local scrollOffset = 0
@@ -299,20 +295,20 @@ end
 
 local function getPimProxy()
     local addr = getPimAddr()
-    if not addr then return nil end
+    if not addr then return nil
     local ok, proxy = pcall(component.proxy, addr)
-    if ok then return proxy end
+    if ok then return proxy
     return nil
 end
 
 local function getPlayerOnPim()
     local pim = getPimProxy()
-    if not pim then return nil end
+    if not pim then return nil
     local methods = {"getPlayer", "getPlayerName", "getUsername"}
     for _, method in ipairs(methods) do
         if type(pim[method]) == "function" then
             local ok, name = pcall(pim[method], pim)
-            if ok and name and name ~= "" then return name end
+            if ok and name and name ~= "" then return name
         end
     end
     return nil
@@ -320,24 +316,24 @@ end
 
 local function isPlayerOnPim()
     local pim = getPimProxy()
-    if not pim then return false end
+    if not pim then return false
     if type(pim.getInventorySize) == "function" then
         local ok, size = pcall(pim.getInventorySize, pim)
-        if ok and tonumber(size) and tonumber(size) > 0 then return true end
+        if ok and tonumber(size) and tonumber(size) > 0 then return true
     end
     return getPlayerOnPim() ~= nil
 end
 
 local function scanPlayerInventory(targetName, targetDamage)
     local pim = getPimProxy()
-    if not pim then return 0 end
+    if not pim then return 0
     targetDamage = tonumber(targetDamage) or 0
     local total = 0
     for slot = 1, 36 do
         local stack = nil
         if type(pim.getStackInSlot) == "function" then
             local ok, st = pcall(pim.getStackInSlot, pim, slot)
-            if ok then stack = st end
+            if ok then stack = st
         end
         if stack then
             local qty = tonumber(stack.size or stack.qty or 0) or 0
@@ -355,15 +351,15 @@ end
 
 local function extractToME(targetName, amount, targetDamage)
     local pim = getPimProxy()
-    if not pim or amount <= 0 then return 0 end
+    if not pim or amount <= 0 then return 0
     targetDamage = tonumber(targetDamage) or 0
     local extracted = 0
     for slot = 1, 36 do
-        if extracted >= amount then break end
+        if extracted >= amount then break
         local stack = nil
         if type(pim.getStackInSlot) == "function" then
             local ok, st = pcall(pim.getStackInSlot, pim, slot)
-            if ok then stack = st end
+            if ok then stack = st
         end
         if stack then
             local qty = tonumber(stack.size or stack.qty or 0) or 0
@@ -387,9 +383,9 @@ end
 
 local function getMEQuantity(internalName, damage)
     local me = getMeAddr()
-    if not me then return 0 end
+    if not me then return 0
     local ok, items = pcall(component.invoke, me, "getItemsInNetwork")
-    if not ok or type(items) ~= "table" then return 0 end
+    if not ok or type(items) ~= "table" then return 0
     damage = tonumber(damage) or 0
     local total = 0
     for _, item in ipairs(items) do
@@ -409,24 +405,22 @@ local function loadCatalog(mode, callback)
             local data = response.data
             if mode == "buy" then
                 buyCatalog = data.catalog or {}
-                buyVersion = data.version or 0
                 if catalogMode == "buy" then
                     allItems = buyCatalog
                     filterItems()
-                    if currentScreen == "shop" then redrawAll() end
+                    if currentScreen == "shop" then redrawAll()
                 end
             else
                 sellCatalog = data.sellItems or {}
-                sellVersion = data.version or 0
                 if catalogMode == "sell" then
                     allItems = sellCatalog
                     filterItems()
-                    if currentScreen == "shop" then redrawAll() end
+                    if currentScreen == "shop" then redrawAll()
                 end
             end
-            if callback then callback(true) end
+            if callback then callback(true)
         else
-            if callback then callback(false, response.message) end
+            if callback then callback(false, response.message)
         end
     end)
 end
@@ -454,12 +448,12 @@ end
 
 -- Покупка/продажа
 local function performPurchase(item, qty)
-    if not currentPlayer or qty <= 0 then return false, "Некорректные данные" end
-    if playerBanned then return false, "Вы забанены" end
-    if shopPaused then return false, "Магазин на паузе" end
+    if not currentPlayer or qty <= 0 then return false, "Некорректные данные"
+    if playerBanned then return false, "Вы забанены"
+    if shopPaused then return false, "Магазин на паузе"
 
     local stock = getMEQuantity(item.internalName, item.damage)
-    if stock < qty then return false, "Недостаточно товара на складе (в ME)" end
+    if stock < qty then return false, "Недостаточно товара на складе (в ME)"
 
     local txid = "BUY-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
     local payload = {
@@ -482,11 +476,11 @@ local function performPurchase(item, qty)
     end
 
     local id = item.internalName
-    if not id:find(":") then id = "minecraft:" .. id end
+    if not id:find(":") then id = "minecraft:" .. id
     local fingerprint = { id = id, dmg = tonumber(item.damage) or 0 }
     local maxStack = 64
     local ok, detail = pcall(component.invoke, meAddr, "getItemDetail", item.internalName, item.damage)
-    if ok and detail and detail.maxSize then maxStack = detail.maxSize end
+    if ok and detail and detail.maxSize then maxStack = detail.maxSize
 
     local remaining = qty
     local delivered = 0
@@ -529,15 +523,15 @@ local function performPurchase(item, qty)
 end
 
 local function performSell(item, qty)
-    if not currentPlayer or qty <= 0 then return false, "Некорректные данные" end
-    if playerBanned then return false, "Вы забанены" end
-    if shopPaused then return false, "Магазин на паузе" end
+    if not currentPlayer or qty <= 0 then return false, "Некорректные данные"
+    if playerBanned then return false, "Вы забанены"
+    if shopPaused then return false, "Магазин на паузе"
 
     local inventoryQty = scanPlayerInventory(item.internalName, item.damage)
-    if inventoryQty < qty then return false, "Недостаточно предметов в инвентаре" end
+    if inventoryQty < qty then return false, "Недостаточно предметов в инвентаре"
 
     local extracted = extractToME(item.internalName, qty, item.damage)
-    if extracted == 0 then return false, "Не удалось изъять предметы" end
+    if extracted == 0 then return false, "Не удалось изъять предметы"
 
     local txid = "SELL-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
     local payload = {
@@ -563,7 +557,7 @@ end
 local function filterItems()
     items = {}
     if searchQuery == "" then
-        for i, v in ipairs(allItems) do items[i] = v end
+        for i, v in ipairs(allItems) do items[i] = v
     else
         local q = lowerText(searchQuery)
         for _, v in ipairs(allItems) do
@@ -664,7 +658,7 @@ end
 
 local function drawItemRow(index, y)
     local item = items[index]
-    if not item then return end
+    if not item then return
     local isSelected = (index == selectedIndex)
     if isSelected then
         fill(LIST_X, y, LIST_W, 1, C.selectedBg)
@@ -714,7 +708,7 @@ local function drawInfoBlock()
     fill(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, 7, C.bg)
     sectionHeader(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, "ИНФО", C.sectionLine, C.white)
     local item = items[selectedIndex]
-    if not item then return end
+    if not item then return
     local maxLen = RIGHT_INNER_W - 8
     local y = INFO_Y + 2
     text(RIGHT_INNER_X, y, "Товар: " .. truncate(item.displayName or item.name or "", maxLen), C.white, C.bg)
@@ -820,9 +814,9 @@ local function redrawAll()
 end
 
 local function selectItem(index)
-    if #items == 0 then return end
-    if index < 1 then index = 1 end
-    if index > #items then index = #items end
+    if #items == 0 then return
+    if index < 1 then index = 1
+    if index > #items then index = #items
     selectedIndex = index
     if selectedIndex - 1 < scrollOffset then
         scrollOffset = selectedIndex - 1
@@ -946,7 +940,7 @@ end
 
 local function handleLoginKey(char, code)
     if code == keyboard.keys.enter then
-        if loginName == "" then return end
+        if loginName == "" then return
         local ok, err = openSession(loginName)
         if ok then
             currentScreen = "shop"
