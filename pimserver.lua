@@ -1,214 +1,1350 @@
--- ============================================================
--- VIP-SHOP MODEM SERVER
--- Центральный сервер экономики + админ-панель.
--- Интернет-карта не используется.
--- ============================================================
+local component = require("component")
+local event = require("event")
+local serialization = require("serialization")
+local filesystem = require("filesystem")
+local gpu = component.gpu
+local math = require("math")
+local os = require("os")
+local unicode = require("unicode")
+local computer = require("computer")
+local TIMEZONE_OFFSET = 3 * 3600 
 
-local component=require("component")
-local event=require("event")
-local keyboard=require("keyboard")
-local unicode=require("unicode")
-local computer=require("computer")
-local serialization=require("serialization")
-local filesystem=require("filesystem")
-local term=require("term")
+local modem = component.modem
+modem.open(0xffef)
+modem.open(0xfffe)
 
-if not component.isAvailable("modem") then error("Не найден модем",0) end
-if not component.isAvailable("gpu") then error("Не найдена видеокарта",0) end
+event.ignore("interrupted", function() end)
+event.ignore("terminate", function() end)
 
-local modem=component.modem
-local gpu=component.gpu
-
--- Эти значения должны совпадать с shop.lua.
-local PROTOCOL="VIPSHOP-MODEM-1"
-local NETWORK_KEY="VIPSHOP_ZOZIDO_REALM9_SECRET_2026"
-local SERVER_PORT=3410
-local CLIENT_PORT=3411
-local CHUNK_SIZE=6000
-local OFFLINE_AFTER=45
-
-local DATA_DIR="/home/vipshop_data"
-local STATE_FILE=DATA_DIR.."/state.db"
-local BACKUP_FILE=DATA_DIR.."/state.backup.db"
-local MAX_TRANSACTIONS=10000
-local MAX_OPERATIONS=20000
-
-modem.open(SERVER_PORT)
-
-local WIDTH,HEIGHT=gpu.getResolution()
-local maxW,maxH=gpu.maxResolution()
-if maxW and maxH and (WIDTH<maxW or HEIGHT<maxH) then gpu.setResolution(maxW,maxH) WIDTH,HEIGHT=gpu.getResolution() end
-
-local C={bg=0x0C0C0C,panel=0x11191D,header=0x0A0A0A,line=0x27BDEC,accent=0x0C9A76,white=0xFFFFFF,gray=0xAAAAAA,dark=0x555555,green=0x55FF55,yellow=0xFFAA00,red=0xFF5555,cyan=0x55FFFF,selected=0x002440,input=0x1A1A1A,button=0x0A502D,alt=0x1A5A6B,danger=0x8B1A1A,pause=0x8A5A00}
-
-local function ulen(v)return unicode.len(tostring(v or ""))end
-local function usub(v,a,b)return unicode.sub(tostring(v or ""),a,b)end
-local function trunc(v,w)v=tostring(v or "") w=math.max(1,tonumber(w)or 1) if ulen(v)<=w then return v end return w<=1 and usub(v,1,w) or usub(v,1,w-1).."…" end
-local function fill(x,y,w,h,bg,ch)if w<=0 or h<=0 then return end gpu.setBackground(bg or C.bg) gpu.fill(x,y,w,h,ch or " ")end
-local function write(x,y,v,fg,bg)if y<1 or y>HEIGHT or x>WIDTH then return end v=tostring(v or "") if x<1 then v=usub(v,2-x)x=1 end if v=="" then return end gpu.setForeground(fg or C.white)gpu.setBackground(bg or C.bg)gpu.set(x,y,trunc(v,WIDTH-x+1))end
-local function centerX(v,left,w)left=left or 1 w=w or WIDTH return left+math.max(0,math.floor((w-ulen(v))/2))end
-local function center(y,v,fg,bg,left,w)write(centerX(v,left,w),y,v,fg,bg)end
-local function box(x,y,w,h,fg,bg)if w<2 or h<2 then return end fg=fg or C.line bg=bg or C.bg write(x,y,"┌"..string.rep("─",w-2).."┐",fg,bg)for r=y+1,y+h-2 do write(x,r,"│",fg,bg)write(x+w-1,r,"│",fg,bg)end write(x,y+h-1,"└"..string.rep("─",w-2).."┘",fg,bg)end
-local function num(v,d)local n=tonumber(v)if n==nil then return d or 0 end return n end
-local function trim(v)local s=string.format("%.4f",num(v,0)):gsub("0+$",""):gsub("%.$","")return s=="" and "0" or s end
-local function stamp()return os and os.date and os.date("%d.%m.%Y %H:%M:%S")or tostring(math.floor(computer.uptime()))end
-local function clone(v)if type(v)~="table" then return v end local r={}for k,n in pairs(v)do r[k]=clone(n)end return r end
-
-if not filesystem.exists(DATA_DIR)then filesystem.makeDirectory(DATA_DIR)end
-local function readTable(path)if not filesystem.exists(path)then return nil end local f=io.open(path,"r")if not f then return nil end local raw=f:read("*a")f:close()local ok,v=pcall(serialization.unserialize,raw or "")if ok and type(v)=="table"then return v end return nil end
-local function atomicSave(path,value)local raw=serialization.serialize(value)local tmp=path..".tmp"local f=io.open(tmp,"w")if not f then return false,"Не открыть временный файл"end f:write(raw)f:close()if filesystem.exists(path)then pcall(filesystem.remove,BACKUP_FILE)pcall(filesystem.rename,path,BACKUP_FILE)end local ok=pcall(filesystem.rename,tmp,path)if ok and filesystem.exists(path)then return true end local out=io.open(path,"w")if not out then return false,"Не сохранить state.db"end out:write(raw)out:close()pcall(filesystem.remove,tmp)return true end
-
-local function defaultState()return{version=1,maintenance=false,buyVersion=1,sellVersion=1,nextTransaction=1,buyCatalog={{displayName="Алмаз",internalName="minecraft:diamond",damage=0,priceCoin=10,priceEma=0,article="#VIP-001",enabled=true}},sellCatalog={{displayName="Железный слиток",internalName="minecraft:iron_ingot",damage=0,priceCoin=1,priceEma=0,article="#SELL-001",enabled=true}},users={},transactions={},operations={},terminals={},updatedAt=stamp()}end
-local state=readTable(STATE_FILE)or defaultState()
-state.buyCatalog=type(state.buyCatalog)=="table"and state.buyCatalog or{}
-state.sellCatalog=type(state.sellCatalog)=="table"and state.sellCatalog or{}
-state.users=type(state.users)=="table"and state.users or{}
-state.transactions=type(state.transactions)=="table"and state.transactions or{}
-state.operations=type(state.operations)=="table"and state.operations or{}
-state.terminals=type(state.terminals)=="table"and state.terminals or{}
-state.nextTransaction=math.max(1,math.floor(num(state.nextTransaction,1)))
-state.buyVersion=num(state.buyVersion,1)state.sellVersion=num(state.sellVersion,1)state.maintenance=state.maintenance==true
-
-local function prune()while #state.transactions>MAX_TRANSACTIONS do table.remove(state.transactions,1)end local count=0 for _ in pairs(state.operations)do count=count+1 end if count>MAX_OPERATIONS then local arr={}for id,op in pairs(state.operations)do arr[#arr+1]={id=id,t=num(op.createdAtUptime,0)}end table.sort(arr,function(a,b)return a.t<b.t end)for i=1,count-MAX_OPERATIONS do state.operations[arr[i].id]=nil end end end
-local function saveState()prune()state.updatedAt=stamp()return atomicSave(STATE_FILE,state)end
-saveState()
-
-local buyIndex,sellIndex={},{}
-local function ikey(id,dmg)return tostring(id or "")..":"..tostring(math.floor(num(dmg,0)))end
-local function rebuild()buyIndex={}sellIndex={}for i,item in ipairs(state.buyCatalog)do if type(item)=="table"and item.internalName then buyIndex[ikey(item.internalName,item.damage)]={index=i,item=item}end end for i,item in ipairs(state.sellCatalog)do if type(item)=="table"and item.internalName then sellIndex[ikey(item.internalName,item.damage)]={index=i,item=item}end end end
-rebuild()
-
-local function findUser(name)name=tostring(name or "")for stored in pairs(state.users)do if tostring(stored):lower()==name:lower()then return stored end end return nil end
-local function ensureUser(name)name=tostring(name or "")local stored=findUser(name)or name if stored==""then return nil,nil end if type(state.users[stored])~="table"then state.users[stored]={balanceCoin=0,balanceEma=0,transactions=0,regDate=stamp(),agreed=true,banned=false,banDuration=0}saveState()end return stored,state.users[stored]end
-local function publicUser(name,u)return{found=type(u)=="table",name=name,balanceCoin=num(u and u.balanceCoin,0),balanceEma=num(u and u.balanceEma,0),transactions=math.floor(num(u and u.transactions,0)),regDate=u and u.regDate or nil,agreed=u and u.agreed==true,banned=u and u.banned==true,banReason=u and u.banReason or nil,banDuration=math.floor(num(u and u.banDuration,0)),bannedBy=u and u.bannedBy or nil,bannedAt=u and u.bannedAt or nil}end
-local function nextTx()local n=state.nextTransaction state.nextTransaction=n+1 return n end
-
-local function registerTerminal(address,id)id=tostring(id or "")if id==""then id="TERM-"..tostring(address):sub(1,8)end local t=state.terminals[id]local created=false if type(t)~="table"then t={id=id,address=address,name=id,paused=false,lastSeen=computer.uptime(),createdAt=stamp()}state.terminals[id]=t created=true end t.address=address t.lastSeen=computer.uptime()t.online=true if created then saveState()end return t end
-
-local function sendChunks(address,port,requestId,response)local raw=serialization.serialize(response)local total=math.max(1,math.ceil(#raw/CHUNK_SIZE))for i=1,total do local first=(i-1)*CHUNK_SIZE+1 local chunk=raw:sub(first,first+CHUNK_SIZE-1)modem.send(address,port,PROTOCOL,"chunk",NETWORK_KEY,requestId,i,total,chunk)if total>1 then os.sleep(0.02)end end end
-local function broadcast(action,data)modem.broadcast(CLIENT_PORT,PROTOCOL,"push",NETWORK_KEY,action,serialization.serialize(data or{}))end
-local function directPush(address,action,data)if address and address~=""then modem.send(address,CLIENT_PORT,PROTOCOL,"push",NETWORK_KEY,action,serialization.serialize(data or{}))end end
-
-local function allowed(address,payload)if type(payload)~="table"then return false,"Пустой запрос"end local action=tostring(payload.action or "")if action=="discover"then return true end local terminal=registerTerminal(address,payload.terminalId)if terminal.paused and action~="hello"and action~="heartbeat"and action~="get_state"and action~="session_close"then return false,"Терминал поставлен на паузу"end return true,terminal end
-local function sameOwner(op,name)return tostring(op.player or ""):lower()==tostring(name or ""):lower()end
-
-local function doPurchase(payload,terminal)
- local player=tostring(payload.name or payload.player or "")local txid=tostring(payload.transactionId or "")local id=tostring(payload.item or payload.internalName or "")local dmg=math.floor(num(payload.damage,0))local qty=math.floor(num(payload.qty,0))
- if txid==""or player==""or id==""or qty<=0 then return{status="error",message="Некорректные данные покупки"}end
- local old=state.operations[txid]if type(old)=="table"then if old.type~="buy"then return{status="error",message="ID занят продажей"}end if not sameOwner(old,player)then return{status="error",message="ID принадлежит другому игроку"}end return{status="ok",duplicate=true,data=clone(old.response or{})}end
- if state.maintenance then return{status="error",message="Магазин на техработах"}end if terminal and terminal.paused then return{status="error",message="Терминал на паузе"}end
- local stored,u=ensureUser(player)if not u then return{status="error",message="Игрок не найден"}end if u.banned then return{status="error",message="Доступ игрока заблокирован"}end
- local found=buyIndex[ikey(id,dmg)]local item=found and found.item if not item or item.enabled==false then return{status="error",message="Товар отсутствует в покупках"}end
- local uc,ue=num(item.priceCoin,0),num(item.priceEma,0)local totalC,totalE=uc*qty,ue*qty local beforeC,beforeE=num(u.balanceCoin,0),num(u.balanceEma,0)
- if beforeC<totalC or beforeE<totalE then return{status="error",message="Недостаточно средств",data={balanceCoin=beforeC,balanceEma=beforeE,requiredCoin=totalC,requiredEma=totalE}}end
- local txnum=nextTx()local oldTrans=num(u.transactions,0)u.balanceCoin=beforeC-totalC u.balanceEma=beforeE-totalE u.transactions=math.floor(oldTrans)+1
- local transaction={id=txnum,transactionId=txid,player=stored,type="buy",item=tostring(item.displayName or id),internalName=id,damage=dmg,qty=qty,coin=totalC,ema=totalE,date=stamp()}
- state.transactions[#state.transactions+1]=transaction
- local response={transactionId=txid,transaction=txnum,beforeCoin=beforeC,beforeEma=beforeE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions,qty=qty,unitCoin=uc,unitEma=ue,totalCoin=totalC,totalEma=totalE}
- state.operations[txid]={type="buy",status="charged",player=stored,requestedQty=qty,unitCoin=uc,unitEma=ue,transactionIndex=#state.transactions,response=clone(response),createdAt=stamp(),createdAtUptime=computer.uptime()}
- local ok,err=saveState()if not ok then state.operations[txid]=nil table.remove(state.transactions)state.nextTransaction=txnum u.balanceCoin=beforeC u.balanceEma=beforeE u.transactions=oldTrans return{status="error",message=err or "Ошибка сохранения"}end
- broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
+local tmpfs = component.proxy(computer.tmpAddress())
+local function getRealTimestamp()
+    local handle = tmpfs.open("/time", "w")
+    tmpfs.write(handle, "time")
+    tmpfs.close(handle)
+    return tmpfs.lastModified("/time") / 1000 + TIMEZONE_OFFSET
 end
 
-local function adjustPurchase(payload)
- local txid=tostring(payload.transactionId or "")local delivered=math.max(0,math.floor(num(payload.deliveredQty,0)))local op=state.operations[txid]
- if type(op)~="table"or op.type~="buy"then return{status="error",message="Покупка не найдена"}end if op.status=="adjusted"then return{status="ok",duplicate=true,data=clone(op.adjustResponse or{})}end
- local requested=math.max(0,math.floor(num(op.requestedQty,0)))delivered=math.min(requested,delivered)local missing=requested-delivered local refundC,refundE=num(op.unitCoin,0)*missing,num(op.unitEma,0)*missing
- local stored=findUser(op.player)local u=stored and state.users[stored]if not u then return{status="error",message="Игрок операции не найден"}end
- u.balanceCoin=num(u.balanceCoin,0)+refundC u.balanceEma=num(u.balanceEma,0)+refundE if delivered==0 then u.transactions=math.max(0,math.floor(num(u.transactions,0))-1)end
- local tx=state.transactions[op.transactionIndex]if type(tx)=="table"then tx.qty=delivered tx.coin=num(op.unitCoin,0)*delivered tx.ema=num(op.unitEma,0)*delivered tx.adjusted=true tx.refundedQty=missing end
- local response={transactionId=txid,deliveredQty=delivered,refundedQty=missing,refundCoin=refundC,refundEma=refundE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions}
- op.status="adjusted"op.deliveredQty=delivered op.adjustResponse=clone(response)op.updatedAt=stamp()saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
+local function getRealTimeString()
+    return os.date("%H:%M:%S", getRealTimestamp())
 end
 
-local function finalizePurchase(payload)local txid=tostring(payload.transactionId or "")local op=state.operations[txid]if type(op)~="table"or op.type~="buy"then return{status="error",message="Покупка не найдена"}end if op.status~="adjusted"then op.status="completed"op.deliveredQty=op.requestedQty op.completedAt=stamp()saveState()end return{status="ok",data={transactionId=txid,status=op.status}}end
-
-local function doSale(payload,terminal)
- local player=tostring(payload.name or payload.player or "")local txid=tostring(payload.transactionId or "")local id=tostring(payload.item or payload.internalName or "")local dmg=math.floor(num(payload.damage,0))local qty=math.floor(num(payload.qty,0))
- if txid==""or player==""or id==""or qty<=0 then return{status="error",message="Некорректные данные продажи"}end
- local old=state.operations[txid]if type(old)=="table"then if old.type~="sell"then return{status="error",message="ID занят покупкой"}end if not sameOwner(old,player)then return{status="error",message="ID принадлежит другому игроку"}end return{status="ok",duplicate=true,data=clone(old.response or{})}end
- if state.maintenance then return{status="error",message="Магазин на техработах"}end if terminal and terminal.paused then return{status="error",message="Терминал на паузе"}end
- local stored,u=ensureUser(player)if not u then return{status="error",message="Игрок не найден"}end if u.banned then return{status="error",message="Доступ игрока заблокирован"}end
- local found=sellIndex[ikey(id,dmg)]local item=found and found.item if not item or item.enabled==false then return{status="error",message="Товар отсутствует в продажах"}end
- local uc,ue=num(item.priceCoin,0),num(item.priceEma,0)local earnedC,earnedE=uc*qty,ue*qty local beforeC,beforeE=num(u.balanceCoin,0),num(u.balanceEma,0)local oldTrans=num(u.transactions,0)local txnum=nextTx()
- u.balanceCoin=beforeC+earnedC u.balanceEma=beforeE+earnedE u.transactions=math.floor(oldTrans)+1
- local tx={id=txnum,transactionId=txid,player=stored,type="sell",item=tostring(item.displayName or id),internalName=id,damage=dmg,qty=qty,coin=earnedC,ema=earnedE,date=stamp()}state.transactions[#state.transactions+1]=tx
- local response={transactionId=txid,transaction=txnum,beforeCoin=beforeC,beforeEma=beforeE,balanceCoin=u.balanceCoin,balanceEma=u.balanceEma,transactions=u.transactions,qty=qty,unitCoin=uc,unitEma=ue,earnedCoin=earnedC,earnedEma=earnedE}
- state.operations[txid]={type="sell",status="completed",player=stored,qty=qty,response=clone(response),createdAt=stamp(),createdAtUptime=computer.uptime()}
- local ok,err=saveState()if not ok then state.operations[txid]=nil table.remove(state.transactions)state.nextTransaction=txnum u.balanceCoin=beforeC u.balanceEma=beforeE u.transactions=oldTrans return{status="error",message=err or "Ошибка сохранения"}end
- broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=response}
+local function getRealDateTimeString()
+    return os.date("%d.%m.%Y %H:%M:%S", getRealTimestamp())
 end
 
-local function handle(address,payload)
- local ok,terminal=allowed(address,payload)if not ok then return{status="error",message=terminal}end local action=tostring(payload.action or "")
- if action=="hello"or action=="heartbeat"then return{status="ok",data={serverAddress=modem.address,maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion}}
- elseif action=="get_state"then return{status="ok",data={maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion}}
- elseif action=="session_open"then local stored,u=ensureUser(payload.name or payload.player)return{status="ok",data={maintenance=state.maintenance,terminalPaused=terminal.paused==true,buyVersion=state.buyVersion,sellVersion=state.sellVersion,user=publicUser(stored or payload.name,u)}}
- elseif action=="session_close"then return{status="ok",data={closed=true}}
- elseif action=="get_catalog"then if tostring(payload.catalog or "buy")=="sell"then return{status="ok",data={version=state.sellVersion,sellItems=clone(state.sellCatalog)}}end return{status="ok",data={version=state.buyVersion,catalog=clone(state.buyCatalog)}}
- elseif action=="get_balance"then local stored=findUser(payload.name or payload.player)local u=stored and state.users[stored]return{status="ok",data=publicUser(stored or payload.name,u)}
- elseif action=="check_ban"then local stored=findUser(payload.name or payload.player)local u=stored and state.users[stored]return{status="ok",data={banned=u and u.banned==true or false,reason=u and u.banReason or nil,duration=u and u.banDuration or 0,admin=u and u.bannedBy or nil,date=u and u.bannedAt or nil}}
- elseif action=="update_balance"then local stored,u=ensureUser(payload.name or payload.player)if not u then return{status="error",message="Имя игрока обязательно"}end if payload.coin~=nil then u.balanceCoin=num(payload.coin,u.balanceCoin)end if payload.ema~=nil then u.balanceEma=num(payload.ema,u.balanceEma)end if payload.transactions~=nil then u.transactions=math.max(0,math.floor(num(payload.transactions,u.transactions)))end if payload.agreed~=nil then u.agreed=payload.agreed==true end if payload.regDate then u.regDate=tostring(payload.regDate)end saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})return{status="ok",data=publicUser(stored,u)}
- elseif action=="purchase"then return doPurchase(payload,terminal)
- elseif action=="adjust_purchase"or action=="refund_purchase"then return adjustPurchase(payload)
- elseif action=="finalize_purchase"then return finalizePurchase(payload)
- elseif action=="sell"then return doSale(payload,terminal)
- elseif action=="get_operation"then local op=state.operations[tostring(payload.transactionId or "")]return{status="ok",data={found=type(op)=="table",operation=type(op)=="table"and clone(op)or nil}}
- end return{status="error",message="Неизвестное действие: "..action}
+local ansi = {
+    reset   = "\27[0m",
+    bold    = "\27[1m",
+    red     = "\27[31m",
+    green   = "\27[32m",
+    yellow  = "\27[33m",
+    blue    = "\27[34m",
+    magenta = "\27[35m",
+    cyan    = "\27[36m",
+    white   = "\27[37m",
+    bg_black   = "\27[40m",
+    bg_blue    = "\27[44m",
+    clear   = "\27[2J\27[H",
+    hide_cursor = "\27[?25l",
+    show_cursor = "\27[?25h"
+}
+
+local function setColor(fg, bg)
+    io.write(fg or "")
+    if bg then io.write(bg) end
 end
 
--- ================= ADMIN GUI =================
-local ui={tab="buy",selected=1,scroll=0,search="",searchFocused=false,activeField=nil,fields={},buttons={},rows={},form={},message="Сервер запущен",messageColor=C.green,lastDraw=0}
-local tabs={{id="buy",title="ПОКУПКИ"},{id="sell",title="ПРОДАЖИ"},{id="users",title="ПОЛЬЗОВАТЕЛИ"},{id="transactions",title="ТРАНЗАКЦИИ"},{id="terminals",title="ТЕРМИНАЛЫ"}}
-local TOP=4 local BOTTOM=3 local MAIN_Y=TOP+1 local MAIN_H=HEIGHT-TOP-BOTTOM local LEFT_W=math.max(38,math.floor(WIDTH*0.52))local RIGHT_X=LEFT_W+2 local RIGHT_W=WIDTH-RIGHT_X local LIST_Y=MAIN_Y+3 local LIST_H=MAIN_H-4
-local function msg(v,c)ui.message=tostring(v or "")ui.messageColor=c or C.white end
-local function clearControls()ui.fields={}ui.buttons={}ui.rows={}end
-local function addField(id,label,value,x,y,w,opt)opt=opt or{}local f={id=id,label=label,value=tostring(value or ""),x=x,y=y,w=w,numeric=opt.numeric==true,readonly=opt.readonly==true}ui.fields[#ui.fields+1]=f return f end
-local function addButton(id,label,x,y,w,bg,fg)local b={id=id,label=label,x=x,y=y,w=w,bg=bg or C.button,fg=fg or C.white}ui.buttons[#ui.buttons+1]=b fill(x,y,w,1,b.bg)center(y,label,b.fg,b.bg,x,w)return b end
-local function fby(id)for _,f in ipairs(ui.fields)do if f.id==id then return f end end end
-local function fv(id)local f=fby(id)return f and f.value or "" end
-local function drawField(f,focus)write(f.x,f.y,f.label,C.gray,C.bg)local ix=f.x+15 local iw=math.max(8,f.w-15)fill(ix,f.y,iw,1,C.input)write(ix+1,f.y,trunc(f.value,iw-2),f.readonly and C.dark or(focus and C.cyan or C.white),C.input)end
+local function resetColor()
+    io.write(ansi.reset)
+end
 
-local function listData()local r={}local q=tostring(ui.search or ""):lower()if ui.tab=="buy"or ui.tab=="sell"then local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog for i,it in ipairs(src)do local name=tostring(it.displayName or it.internalName or "")if q==""or name:lower():find(q,1,true)then r[#r+1]={sourceIndex=i,title=name,sub=tostring(it.internalName or ""),raw=it}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)
- elseif ui.tab=="users"then for name,u in pairs(state.users)do if q==""or tostring(name):lower():find(q,1,true)then r[#r+1]={key=name,title=name,sub="COINA "..trim(u.balanceCoin).." | EMA "..trim(u.balanceEma),raw=u}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)
- elseif ui.tab=="transactions"then for i=#state.transactions,1,-1 do local t=state.transactions[i]local title="#"..tostring(t.id or i).." "..tostring(t.player or "?")local full=title.." "..tostring(t.item or "")if q==""or full:lower():find(q,1,true)then r[#r+1]={sourceIndex=i,title=title,sub=tostring(t.type or "").." | "..tostring(t.item or "").." ×"..tostring(t.qty or 0),raw=t}end end
- else for id,t in pairs(state.terminals)do local title=tostring(t.name or id)if q==""or title:lower():find(q,1,true)then r[#r+1]={key=id,title=title,sub=t.online and"ONLINE"or"OFFLINE",raw=t}end end table.sort(r,function(a,b)return a.title:lower()<b.title:lower()end)end return r end
-local function selected(list)if #list==0 then return nil end ui.selected=math.max(1,math.min(ui.selected,#list))return list[ui.selected]end
-local function loadForm()local e=selected(listData())ui.form={}if ui.tab=="buy"or ui.tab=="sell"then local it=e and e.raw or{}ui.form={displayName=tostring(it.displayName or""),internalName=tostring(it.internalName or""),damage=tostring(it.damage or 0),priceCoin=trim(it.priceCoin or 0),priceEma=trim(it.priceEma or 0),article=tostring(it.article or""),enabled=it.enabled~=false,sourceIndex=e and e.sourceIndex or nil}
- elseif ui.tab=="users"then local u=e and e.raw or{}ui.form={name=e and e.key or"",balanceCoin=trim(u.balanceCoin or 0),balanceEma=trim(u.balanceEma or 0),transactions=tostring(u.transactions or 0),reason=tostring(u.banReason or""),duration=tostring(u.banDuration or 0),admin=tostring(u.bannedBy or"Admin"),banned=u.banned==true}
- elseif ui.tab=="terminals"then local t=e and e.raw or{}ui.form={id=e and e.key or"",name=tostring(t.name or(e and e.key)or""),address=tostring(t.address or""),paused=t.paused==true,online=t.online==true}end end
+local function gotoxy(x, y)
+    io.write("\27[", y, ";", x, "H")
+end
 
-local function drawHeader()fill(1,1,WIDTH,TOP,C.header)center(1,"──── VIP-SHOP MODEM SERVER ────",C.accent,C.header)local x=2 for _,t in ipairs(tabs)do local w=ulen(t.title)+4 local active=ui.tab==t.id fill(x,3,w,1,active and C.selected or C.panel)center(3,t.title,active and C.cyan or C.gray,active and C.selected or C.panel,x,w)t.x=x t.w=w x=x+w+1 end local a="MODEM: "..tostring(modem.address)write(math.max(1,WIDTH-ulen(a)-1),1,a,C.gray,C.header)end
-local function drawList(list)fill(1,MAIN_Y,LEFT_W,MAIN_H,C.bg)box(1,MAIN_Y,LEFT_W,MAIN_H,C.line,C.bg)write(3,MAIN_Y+1,"ПОИСК:",C.gray,C.bg)local sx=11 local sw=LEFT_W-sx-2 fill(sx,MAIN_Y+1,sw,1,C.input)write(sx+1,MAIN_Y+1,trunc(ui.search,sw-2),ui.searchFocused and C.cyan or C.white,C.input)ui.rows={}local max=math.max(0,#list-LIST_H)ui.scroll=math.max(0,math.min(ui.scroll,max))for row=1,LIST_H do local idx=ui.scroll+row local e=list[idx]local y=LIST_Y+row-1 fill(2,y,LEFT_W-2,1,idx==ui.selected and C.selected or C.bg)if e then write(3,y,trunc(e.title,LEFT_W-5),idx==ui.selected and C.cyan or C.white,idx==ui.selected and C.selected or C.bg)ui.rows[#ui.rows+1]={y=y,index=idx}end end write(3,MAIN_Y+MAIN_H-2,"Всего: "..tostring(#list),C.gray,C.bg)end
-local function catalogEditor()local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,ui.tab=="buy"and"РЕДАКТОР ПОКУПКИ"or"РЕДАКТОР ПРОДАЖИ",C.accent,C.bg)addField("displayName","Название:",ui.form.displayName,x,MAIN_Y+4,w-2)addField("internalName","ID предмета:",ui.form.internalName,x,MAIN_Y+6,w-2)addField("damage","Damage:",ui.form.damage,x,MAIN_Y+8,w-2,{numeric=true})addField("priceCoin","COINA:",ui.form.priceCoin,x,MAIN_Y+10,w-2,{numeric=true})addField("priceEma","EMA:",ui.form.priceEma,x,MAIN_Y+12,w-2,{numeric=true})addField("article","Артикул:",ui.form.article,x,MAIN_Y+14,w-2)write(x,MAIN_Y+16,"Активен:",C.gray,C.bg)addButton("toggle_enabled","[ "..(ui.form.enabled and"ДА"or"НЕТ").." ]",x+15,MAIN_Y+16,10,ui.form.enabled and C.button or C.danger)local y=MAIN_Y+19 addButton("save_item","[ СОХРАНИТЬ ]",x,y,18,C.button)addButton("new_item","[ НОВЫЙ ]",x+20,y,14,C.alt)addButton("delete_item","[ УДАЛИТЬ ]",x+36,y,16,C.danger)write(x,MAIN_Y+22,"Версия: "..tostring(ui.tab=="buy"and state.buyVersion or state.sellVersion),C.gray,C.bg)end
-local function userEditor()local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,"ПОЛЬЗОВАТЕЛЬ",C.accent,C.bg)addField("name","Игрок:",ui.form.name,x,MAIN_Y+4,w-2)addField("balanceCoin","COINA:",ui.form.balanceCoin,x,MAIN_Y+6,w-2,{numeric=true})addField("balanceEma","EMA:",ui.form.balanceEma,x,MAIN_Y+8,w-2,{numeric=true})addField("transactions","Транзакции:",ui.form.transactions,x,MAIN_Y+10,w-2,{numeric=true})addField("reason","Причина:",ui.form.reason,x,MAIN_Y+13,w-2)addField("duration","Срок, сек:",ui.form.duration,x,MAIN_Y+15,w-2,{numeric=true})addField("admin","Администратор:",ui.form.admin,x,MAIN_Y+17,w-2)local y=MAIN_Y+20 addButton("save_user","[ СОХРАНИТЬ ]",x,y,18,C.button)addButton("new_user","[ НОВЫЙ ]",x+20,y,14,C.alt)addButton(ui.form.banned and"unban_user"or"ban_user",ui.form.banned and"[ РАЗБАНИТЬ ]"or"[ ЗАБАНИТЬ ]",x+36,y,18,ui.form.banned and C.button or C.danger)write(x,MAIN_Y+23,ui.form.banned and"СТАТУС: ЗАБЛОКИРОВАН"or"СТАТУС: ДОСТУП РАЗРЕШЁН",ui.form.banned and C.red or C.green,C.bg)end
-local function transactionEditor(e)local x=RIGHT_X write(x,MAIN_Y+1,"ТРАНЗАКЦИЯ",C.accent,C.bg)if not e then write(x,MAIN_Y+4,"Транзакции отсутствуют",C.gray,C.bg)return end local t=e.raw local lines={"Номер: #"..tostring(t.id or"?"),"Игрок: "..tostring(t.player or"?"),"Тип: "..tostring(t.type or"?"),"Товар: "..tostring(t.item or"?"),"ID: "..tostring(t.internalName or"?"),"Количество: "..tostring(t.qty or 0),"COINA: "..trim(t.coin or 0),"EMA: "..trim(t.ema or 0),"Дата: "..tostring(t.date or"?"),"Operation ID: "..tostring(t.transactionId or"?")}for i,l in ipairs(lines)do write(x,MAIN_Y+3+i,trunc(l,RIGHT_W-2),i==3 and C.cyan or C.white,C.bg)end end
-local function terminalEditor(e)local x=RIGHT_X local w=RIGHT_W write(x,MAIN_Y+1,"ТЕРМИНАЛ",C.accent,C.bg)if not e then write(x,MAIN_Y+4,"Терминалы ещё не подключались",C.gray,C.bg)return end addField("terminal_name","Название:",ui.form.name,x,MAIN_Y+4,w-2)addField("terminal_id","Terminal ID:",ui.form.id,x,MAIN_Y+6,w-2,{readonly=true})addField("terminal_address","Modem ID:",ui.form.address,x,MAIN_Y+8,w-2,{readonly=true})write(x,MAIN_Y+11,"Статус: "..(ui.form.online and"ONLINE"or"OFFLINE"),ui.form.online and C.green or C.red,C.bg)write(x,MAIN_Y+12,"Пауза: "..(ui.form.paused and"ВКЛЮЧЕНА"or"ВЫКЛЮЧЕНА"),ui.form.paused and C.yellow or C.green,C.bg)local y=MAIN_Y+15 addButton("save_terminal","[ СОХРАНИТЬ ИМЯ ]",x,y,22,C.button)addButton(ui.form.paused and"resume_terminal"or"pause_terminal",ui.form.paused and"[ СНЯТЬ С ПАУЗЫ ]"or"[ ПОСТАВИТЬ НА ПАУЗУ ]",x+24,y,ui.form.paused and 22 or 26,ui.form.paused and C.button or C.pause)end
-local function drawRight(e)fill(RIGHT_X-1,MAIN_Y,RIGHT_W+1,MAIN_H,C.bg)box(RIGHT_X-1,MAIN_Y,RIGHT_W+1,MAIN_H,C.line,C.bg)if ui.tab=="buy"or ui.tab=="sell"then catalogEditor()elseif ui.tab=="users"then userEditor()elseif ui.tab=="transactions"then transactionEditor(e)else terminalEditor(e)end for i,f in ipairs(ui.fields)do drawField(f,ui.activeField==i)end end
-local function onlineCount()local c=0 local now=computer.uptime()for _,t in pairs(state.terminals)do t.online=now-num(t.lastSeen,0)<=OFFLINE_AFTER if t.online then c=c+1 end end return c end
-local function drawBottom()local y=HEIGHT-BOTTOM+1 fill(1,y,WIDTH,BOTTOM,C.header)addButton("toggle_maintenance",state.maintenance and"[ ТЕХ.РАБОТЫ: ВКЛ ]"or"[ ТЕХ.РАБОТЫ: ВЫКЛ ]",2,y+1,24,state.maintenance and C.danger or C.button)write(29,y+1,trunc("Сервер: ONLINE | Терминалов: "..onlineCount().." | Порт: "..SERVER_PORT,WIDTH-31),C.green,C.header)if ui.message~=""then write(2,y,trunc(ui.message,WIDTH-3),ui.messageColor,C.header)end end
-local function drawAll()clearControls()fill(1,1,WIDTH,HEIGHT,C.bg)drawHeader()local list=listData()if #list==0 then ui.selected=0 ui.scroll=0 elseif ui.selected<=0 then ui.selected=1 elseif ui.selected>#list then ui.selected=#list end drawList(list)local e=selected(list)drawRight(e)drawBottom()ui.lastDraw=computer.uptime()end
-local function reload()loadForm()ui.activeField=nil drawAll()end
+local function fill(x, y, w, h, char)
+    for i = 0, h-1 do
+        gotoxy(x, y+i)
+        io.write(string.rep(char, w))
+    end
+end
 
-local function saveItem()local name,id=fv("displayName"),fv("internalName")if name==""or id==""then msg("Название и ID обязательны",C.red)drawAll()return end local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog local idx=ui.form.sourceIndex local it={displayName=name,internalName=id,damage=math.floor(num(fv("damage"),0)),priceCoin=num(fv("priceCoin"),0),priceEma=num(fv("priceEma"),0),article=fv("article"),enabled=ui.form.enabled~=false}if idx and src[idx]then src[idx]=it else src[#src+1]=it end if ui.tab=="buy"then state.buyVersion=state.buyVersion+1 else state.sellVersion=state.sellVersion+1 end rebuild()saveState()broadcast("catalog_updated",{catalog=ui.tab,version=ui.tab=="buy"and state.buyVersion or state.sellVersion})msg("Товар сохранён и отправлен терминалам",C.green)ui.selected=1 reload()end
-local function deleteItem()local src=ui.tab=="buy"and state.buyCatalog or state.sellCatalog local idx=ui.form.sourceIndex if not idx or not src[idx]then msg("Товар не выбран",C.red)drawAll()return end table.remove(src,idx)if ui.tab=="buy"then state.buyVersion=state.buyVersion+1 else state.sellVersion=state.sellVersion+1 end rebuild()saveState()broadcast("catalog_updated",{catalog=ui.tab,version=ui.tab=="buy"and state.buyVersion or state.sellVersion})msg("Товар удалён",C.yellow)ui.selected=math.max(1,ui.selected-1)reload()end
-local function saveUser()local name=fv("name")if name==""then msg("Укажите имя игрока",C.red)drawAll()return end local stored,u=ensureUser(name)u.balanceCoin=num(fv("balanceCoin"),u.balanceCoin)u.balanceEma=num(fv("balanceEma"),u.balanceEma)u.transactions=math.max(0,math.floor(num(fv("transactions"),u.transactions)))saveState()broadcast("user_updated",{player=stored,user=publicUser(stored,u)})msg("Баланс игрока сохранён",C.green)reload()end
-local function banUser(value)local name=fv("name")local stored,u=ensureUser(name)if not u then msg("Игрок не выбран",C.red)drawAll()return end u.banned=value==true if u.banned then u.banReason=fv("reason")~=""and fv("reason")or"Нарушение правил магазина"u.banDuration=math.max(0,math.floor(num(fv("duration"),0)))u.bannedBy=fv("admin")~=""and fv("admin")or"Admin"u.bannedAt=stamp()else u.banReason=nil u.banDuration=0 u.bannedBy=nil u.bannedAt=nil end saveState()broadcast(u.banned and"user_banned"or"user_unbanned",{player=stored,user=publicUser(stored,u),reason=u.banReason,duration=u.banDuration,admin=u.bannedBy,date=u.bannedAt})msg(u.banned and"Игрок заблокирован"or"Игрок разблокирован",u.banned and C.red or C.green)reload()end
-local function saveTerminal()local id=ui.form.id local t=id and state.terminals[id]if not t then return end t.name=fv("terminal_name")~=""and fv("terminal_name")or id saveState()msg("Название терминала сохранено",C.green)reload()end
-local function pauseTerminal(value)local id=ui.form.id local t=id and state.terminals[id]if not t then return end t.paused=value==true saveState()directPush(t.address,t.paused and"terminal_paused"or"terminal_resumed",{terminalId=id,paused=t.paused})msg(t.paused and"Терминал поставлен на паузу"or"Пауза снята",t.paused and C.yellow or C.green)reload()end
-local function action(id)if id=="toggle_enabled"then ui.form.enabled=not ui.form.enabled drawAll()elseif id=="save_item"then saveItem()elseif id=="new_item"then ui.form={displayName="",internalName="",damage="0",priceCoin="0",priceEma="0",article="",enabled=true}ui.activeField=nil drawAll()elseif id=="delete_item"then deleteItem()elseif id=="save_user"then saveUser()elseif id=="new_user"then ui.form={name="",balanceCoin="0",balanceEma="0",transactions="0",reason="",duration="0",admin="Admin",banned=false}ui.activeField=nil drawAll()elseif id=="ban_user"then banUser(true)elseif id=="unban_user"then banUser(false)elseif id=="save_terminal"then saveTerminal()elseif id=="pause_terminal"then pauseTerminal(true)elseif id=="resume_terminal"then pauseTerminal(false)elseif id=="toggle_maintenance"then state.maintenance=not state.maintenance saveState()broadcast("maintenance_changed",{maintenance=state.maintenance})msg(state.maintenance and"Техработы включены"or"Техработы выключены",state.maintenance and C.red or C.green)drawAll()end end
-local function inside(x,y,c)return y==c.y and x>=c.x and x<c.x+c.w end
-local function touch(x,y)for _,t in ipairs(tabs)do if y==3 and x>=t.x and x<t.x+t.w then ui.tab=t.id ui.selected=1 ui.scroll=0 ui.search=""ui.searchFocused=false loadForm()drawAll()return end end if y==MAIN_Y+1 and x>=11 and x<LEFT_W-1 then ui.searchFocused=true ui.activeField=nil drawAll()return end for _,r in ipairs(ui.rows)do if y==r.y and x>=2 and x<=LEFT_W then ui.selected=r.index ui.searchFocused=false loadForm()drawAll()return end end for i,f in ipairs(ui.fields)do local ix=f.x+15 local iw=math.max(8,f.w-15)if y==f.y and x>=ix and x<ix+iw and not f.readonly then ui.activeField=i ui.searchFocused=false drawAll()return end end for _,b in ipairs(ui.buttons)do if inside(x,y,b)then ui.activeField=nil ui.searchFocused=false action(b.id)return end end ui.activeField=nil ui.searchFocused=false drawAll()end
-local function scroll(direction)local list=listData()local max=math.max(0,#list-LIST_H)ui.scroll=math.max(0,math.min(max,ui.scroll-direction*3))if ui.selected<ui.scroll+1 then ui.selected=ui.scroll+1 end if ui.selected>ui.scroll+LIST_H then ui.selected=ui.scroll+LIST_H end drawAll()end
-local function key(char,code)if code==keyboard.keys.escape then ui.activeField=nil ui.searchFocused=false drawAll()return end if ui.searchFocused then if code==keyboard.keys.back then ui.search=usub(ui.search,1,-2)elseif code==keyboard.keys.enter or code==keyboard.keys.tab then ui.searchFocused=false elseif char and char>=32 then ui.search=ui.search..unicode.char(char)end ui.selected=1 ui.scroll=0 loadForm()drawAll()return end local f=ui.activeField and ui.fields[ui.activeField]if f and not f.readonly then if code==keyboard.keys.back then f.value=usub(f.value,1,-2)elseif code==keyboard.keys.enter or code==keyboard.keys.tab then ui.activeField=nil elseif char and char>=32 then local ch=unicode.char(char)if not f.numeric or ch:match("[%d%.,%-]")then f.value=f.value..ch end end if f.id=="terminal_name"then ui.form.name=f.value else ui.form[f.id]=f.value end drawAll()return end if code==keyboard.keys.up then ui.selected=math.max(1,ui.selected-1)if ui.selected<=ui.scroll then ui.scroll=math.max(0,ui.selected-1)end loadForm()drawAll()elseif code==keyboard.keys.down then local list=listData()ui.selected=math.min(#list,ui.selected+1)if ui.selected>ui.scroll+LIST_H then ui.scroll=ui.selected-LIST_H end loadForm()drawAll()end end
+local function timeToMidnight()
+    local now = getRealTimestamp()
+    local dt = os.date("*t", now)
+    local secondsLeft = (24 - dt.hour - 1) * 3600 + (60 - dt.min - 1) * 60 + (60 - dt.sec)
+    if secondsLeft < 0 then secondsLeft = 0 end
+    local h = math.floor(secondsLeft / 3600)
+    local m = math.floor((secondsLeft % 3600) / 60)
+    local s = secondsLeft % 60
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
 
-loadForm()drawAll()
+local ACCESS_PASSWORD = "secret"
+
+-- ===== СИСТЕМА АДМИНИСТРАТОРОВ =====
+local ADMINS_PATH = "/home/admins.db"
+local admins = {}
+
+-- Загружаем список администраторов
+if filesystem.exists(ADMINS_PATH) then
+    local file = io.open(ADMINS_PATH, "r")
+    if file then
+        local raw = file:read("*a")
+        file:close()
+        if raw and #raw > 0 then
+            local success, data = pcall(serialization.unserialize, raw)
+            if success and type(data) == "table" then
+                admins = data
+            end
+        end
+    end
+end
+
+-- Если нет админов, добавляем ZoziDo по умолчанию
+if #admins == 0 then
+    admins = {"ZoziDo"}
+    local file = io.open(ADMINS_PATH, "w")
+    if file then
+        file:write(serialization.serialize(admins))
+        file:close()
+    end
+end
+
+-- Функция проверки, является ли игрок администратором
+local function isAdmin(playerName)
+    if not playerName then return false end
+    for _, name in ipairs(admins) do
+        if name == playerName then
+            return true
+        end
+    end
+    return false
+end
+
+-- Функция добавления администратора
+local function addAdmin(playerName)
+    if not playerName or playerName == "" then return false end
+    if isAdmin(playerName) then return false end
+    table.insert(admins, playerName)
+    local file = io.open(ADMINS_PATH, "w")
+    if file then
+        file:write(serialization.serialize(admins))
+        file:close()
+        return true
+    end
+    return false
+end
+
+-- Функция удаления администратора
+local function removeAdmin(playerName)
+    if not playerName or playerName == "" then return false end
+    if #admins <= 1 then return false end -- Нельзя удалить последнего админа
+    for i, name in ipairs(admins) do
+        if name == playerName then
+            table.remove(admins, i)
+            local file = io.open(ADMINS_PATH, "w")
+            if file then
+                file:write(serialization.serialize(admins))
+                file:close()
+                return true
+            end
+        end
+    end
+    return false
+end
+-- ===== КОНЕЦ СИСТЕМЫ АДМИНИСТРАТОРОВ =====
+
+local DB_PATH = "/home/players.db"
+local players = {}
+if filesystem.exists(DB_PATH) then
+    local file = io.open(DB_PATH, "r")
+    local raw = file:read("*a")
+    file:close()
+    if raw and #raw > 0 then
+        local success, data = pcall(serialization.unserialize, raw)
+        if success and data then players = data end
+    end
+end
+
+local function saveDB()
+    local file = io.open(DB_PATH, "w")
+    file:write(serialization.serialize(players))
+    file:close()
+end
+
+local STATS_PATH = "/home/global_stats.db"
+local globalStats = { totalReports = 0, totalBuys = 0, totalSells = 0 }
+if filesystem.exists(STATS_PATH) then
+    local file = io.open(STATS_PATH, "r")
+    local raw = file:read("*a")
+    file:close()
+    if raw and #raw > 0 then
+        local success, data = pcall(serialization.unserialize, raw)
+        if success and data then
+            globalStats.totalReports = data.totalReports or 0
+            globalStats.totalBuys = data.totalBuys or 0
+            globalStats.totalSells = data.totalSells or 0
+        end
+    end
+end
+
+local function saveGlobalStats()
+    local file = io.open(STATS_PATH, "w")
+    file:write(serialization.serialize(globalStats))
+    file:close()
+end
+
+local owner = nil
+local sessions = {}
+local markets = {}
+local SESSION_TIMEOUT = 31536000
+local marketConnected = false
+local logBuffer = {}
+local shopPaused = false
+local adminMode = false
+local adminPlayerList = {}
+local adminScroll = 0
+local selectedAdminIndex = 1
+local adminViewHeight = 20
+local editBalanceMode = false
+local editingPlayer = nil
+local editInput = ""
+
+-- Режим добавления администратора
+local addAdminMode = false
+local addAdminInput = ""
+
+local addItemMode = false
+local addItemFields = { internal = "", display = "", price_coin = "", price_ema = "0", damage = "0" }
+local addItemCurrentField = 1
+local addItemFieldNames = { "internal", "display", "price_coin", "price_ema", "damage" }
+local addItemResponse = nil
+local addItemResponseTimer = nil
+
+local sellHistory = {}
+local MAX_SELL_HISTORY = 20
+local ACTIVITY_SIZE = 60
+local activityBuffer = {}
+for i=1, ACTIVITY_SIZE do activityBuffer[i] = 0 end
+local activityIndex = 0
+local screenW, screenH = 80, 25
+local colX = {5, 30, 55, 80}
+local colWidth = 25
+local logStartY = 20
+local maxLogLines = 14
+local drawing = false
+
+local function updateScreenSize()
+    local w, h = gpu.getResolution()
+    if w > 200 then w = 200 end
+    if w < 80 then w = 80 end
+    if h < 15 then h = 15 end
+    screenW, screenH = w, h
+    local usable = screenW - 8
+    colWidth = math.max(12, math.floor(usable / 4))
+    colX = {4, 4 + colWidth, 4 + colWidth * 2, 4 + colWidth * 3}
+    logStartY = math.min(18, screenH - 5)
+    maxLogLines = screenH - logStartY - 3
+    if maxLogLines < 3 then maxLogLines = 3 end
+    adminViewHeight = screenH - 8
+    if adminViewHeight < 3 then adminViewHeight = 3 end
+end
+
+local function addActivity()
+    activityIndex = activityIndex % ACTIVITY_SIZE + 1
+    activityBuffer[activityIndex] = 0
+end
+event.timer(60, addActivity, math.huge)
+
+local function recordTransaction()
+    if activityBuffer[activityIndex] then
+        activityBuffer[activityIndex] = activityBuffer[activityIndex] + 1
+    end
+end
+
+function addLog(text, fg)
+    table.insert(logBuffer, {text = text, color = fg or ansi.white})
+    while #logBuffer > 200 do table.remove(logBuffer, 1) end
+end
+
+local function log(level, msg, emoji)
+    local color = ansi.white
+    if level == "INFO" then color = ansi.green
+    elseif level == "WARN" then color = ansi.yellow
+    elseif level == "ERROR" then color = ansi.red
+    elseif level == "SUCCESS" then color = ansi.green
+    elseif level == "IMPORTANT" then color = ansi.magenta end
+    
+    local prefix = ""
+    if emoji then prefix = emoji .. " " end
+    
+    addLog("[" .. getRealTimeString() .. "] " .. prefix .. msg, color)
+    
+    if level == "IMPORTANT" or level == "SUCCESS" or level == "WARN" then
+        local logFile = io.open("/home/server_events.log", "a")
+        if logFile then
+            logFile:write("[" .. getRealDateTimeString() .. "] " .. prefix .. msg .. "\n")
+            logFile:close()
+        end
+    end
+end
+
+local function logIncoming(from, msg)
+    local importantOps = {
+        ["enter"] = true,
+        ["sell"] = true,
+        ["buy"] = true,
+        ["agree"] = true,
+        ["report"] = true,
+        ["add_feedback"] = true,
+        ["get_feedbacks"] = true
+    }
+    
+    if importantOps[msg.op] then
+        if msg.op == "enter" then
+            if msg.name and msg.name ~= "" then
+                log("INFO", "👤 Вход игрока: " .. msg.name)
+            end
+        elseif msg.op == "sell" then
+            log("SUCCESS", "💰 Продажа от " .. msg.name .. ": " .. (msg.item or "?") .. " x" .. (msg.qty or 0))
+        elseif msg.op == "buy" then
+            log("SUCCESS", "🛒 Покупка от " .. msg.name .. ": " .. (msg.item or "?") .. " x" .. (msg.qty or 0))
+        elseif msg.op == "agree" then
+            log("IMPORTANT", "📝 Соглашение принято: " .. msg.name)
+        elseif msg.op == "report" then
+            log("WARN", "📩 Репорт от " .. msg.name)
+        elseif msg.op == "add_feedback" then
+            log("INFO", "📝 Отзыв от " .. msg.name)
+        elseif msg.op == "get_feedbacks" then
+            log("INFO", "📋 Запрос отзывов от " .. msg.name)
+        end
+    end
+end
+
+local function isAdminConnected()
+    local sess = sessions[ADMIN_NAME]
+    return sess and sess.token and os.time() - (sess.lastAction or 0) < SESSION_TIMEOUT
+end
+
+local function updateAdminPlayerList()
+    adminPlayerList = {}
+    for name, data in pairs(players) do
+        table.insert(adminPlayerList, {name=name, data=data})
+    end
+    table.sort(adminPlayerList, function(a,b) return a.name < b.name end)
+end
+
+local function broadcastUpdate()
+    if next(markets) == nil then
+        addLog("Нет подключённых маркетов для обновления", ansi.red)
+        return
+    end
+    local sent = 0
+    for addr, _ in pairs(markets) do
+        modem.send(addr, 0xffef, serialization.serialize({op="update_market"}))
+        sent = sent + 1
+    end
+    log("SUCCESS", "Обновление отправлено " .. sent .. " терминалам")
+end
+
+local function broadcastKill()
+    if next(markets) == nil then
+        addLog("Нет подключённых маркетов для завершения", ansi.red)
+        return
+    end
+    local sent = 0
+    for addr, _ in pairs(markets) do
+        modem.send(addr, 0xffef, serialization.serialize({op="kill_market"}))
+        sent = sent + 1
+    end
+    log("WARN", "Команда завершения отправлена " .. sent .. " терминалам")
+end
+
+local function drawAdminPanel()
+    if drawing then return end
+    drawing = true
+    io.write(ansi.hide_cursor .. ansi.clear)
+    updateScreenSize()
+
+    setColor(ansi.white)
+    fill(1, 1, screenW, 1, "─")
+    fill(1, screenH, screenW, 1, "─")
+    for y=2, screenH-1 do
+        gotoxy(1, y) io.write("│")
+        gotoxy(screenW, y) io.write("│")
+    end
+    gotoxy(1,1) io.write("┌"..string.rep("─", screenW-2).."┐")
+    gotoxy(1,screenH) io.write("└"..string.rep("─", screenW-2).."┘")
+    resetColor()
+
+    setColor(ansi.bg_blue, ansi.white)
+    fill(1, 2, screenW, 1, " ")
+    gotoxy(1, 2)
+    local title = " PIM MARKET SERVER – СТАТУС: " .. (marketConnected and "АКТИВЕН" or "ОЖИДАНИЕ MARKET")
+    if shopPaused then title = title .. " [ПАУЗА]" end
+    io.write(title .. string.rep(" ", screenW - #title))
+    resetColor()
+    
+    -- Линия под заголовком (из =)
+    setColor(ansi.cyan)
+    gotoxy(1, 3)
+    io.write(string.rep("=", screenW))
+    resetColor()
+
+    local startIdx = adminScroll + 1
+    local endIdx = math.min(#adminPlayerList, adminScroll + adminViewHeight)
+    setColor(ansi.yellow)
+
+    resetColor()
+
+    for i=startIdx, endIdx do
+        local ply = adminPlayerList[i]
+        local isPlayerAdmin = isAdmin(ply.name)
+        local bannedStr = ply.data.banned and " [ЗАБАНЕН]" or ""
+        local adminStr = isPlayerAdmin and " [АДМИН]" or ""
+        local line = string.format("%-20s | Coin: %8.2f ₵ | ЭМЫ: %8.2f ۞ | Транз: %d%s%s",
+            ply.name, ply.data.balance or 0, ply.data.emaBalance or 0, ply.data.transactions or 0, bannedStr, adminStr)
+        if #line > screenW - 4 then line = line:sub(1, screenW-4) end
+        local y = 4 + (i - startIdx)
+        local color = ansi.white
+        if isPlayerAdmin then color = ansi.green end
+        if ply.data.banned then color = ansi.red end
+        setColor((i == selectedAdminIndex) and ansi.bg_blue or color, (i == selectedAdminIndex) and ansi.white or nil)
+        gotoxy(2, y)
+        io.write(line)
+        resetColor()
+    end
+
+    setColor(ansi.cyan)
+    gotoxy(2, screenH-2)
+    io.write("BAN: D | RESET: R | PAUSE: P | EDIT BALANCE: E | ADD ITEM: B | ADD ADMIN: + | REMOVE ADMIN: - | SCROLL: ↑↓ | U - UPDATE | K - KILL MARKET")
+    resetColor()
+    io.flush()
+    drawing = false
+end
+
+-- Увеличенное окно для добавления администратора
+local function drawAddAdminWindow()
+    if drawing then return end
+    drawing = true
+    io.write(ansi.hide_cursor .. ansi.clear)
+    updateScreenSize()
+
+    local w = 60
+    local h = 10
+    local x = math.floor((screenW - w) / 2)
+    local y = math.floor((screenH - h) / 2)
+
+    setColor(ansi.white)
+    fill(x, y, w, h, " ")
+    setColor(ansi.bg_black, ansi.white)
+    for i = 0, h-1 do
+        gotoxy(x, y+i) io.write("│")
+        gotoxy(x+w-1, y+i) io.write("│")
+    end
+    fill(x+1, y, w-2, 1, "─")
+    fill(x+1, y+h-1, w-2, 1, "─")
+    setColor(ansi.bg_blue, ansi.white)
+    fill(x+2, y, w-4, 1, " ")
+    gotoxy(x+2, y) io.write(" ДОБАВЛЕНИЕ АДМИНИСТРАТОРА ")
+    resetColor()
+
+    setColor(ansi.yellow)
+    gotoxy(x+2, y+2) io.write("Текущие админы: " .. table.concat(admins, ", "))
+    gotoxy(x+2, y+3) io.write(string.rep("─", w-4))
+    resetColor()
+
+    setColor(ansi.cyan)
+    gotoxy(x+2, y+4) io.write("Введите ник игрока для добавления в админы: ")
+    setColor(ansi.white)
+    gotoxy(x+2, y+5)
+    io.write(string.rep(" ", w-4))
+    gotoxy(x+2, y+5)
+    io.write(addAdminInput .. "_")
+    resetColor()
+
+    setColor(ansi.white)
+    gotoxy(x+2, y+7) io.write("Enter - добавить | Esc - отмена | ] - выход")
+    resetColor()
+    io.flush()
+    drawing = false
+end
+
+-- Увеличенное окно для редактирования баланса
+local function drawEditBalanceWindow()
+    if drawing then return end
+    drawing = true
+    io.write(ansi.hide_cursor .. ansi.clear)
+    updateScreenSize()
+
+    local w = 60
+    local h = 10
+    local x = math.floor((screenW - w) / 2)
+    local y = math.floor((screenH - h) / 2)
+
+    setColor(ansi.white)
+    fill(x, y, w, h, " ")
+    setColor(ansi.bg_black, ansi.white)
+    for i = 0, h-1 do
+        gotoxy(x, y+i) io.write("│")
+        gotoxy(x+w-1, y+i) io.write("│")
+    end
+    fill(x+1, y, w-2, 1, "─")
+    fill(x+1, y+h-1, w-2, 1, "─")
+    setColor(ansi.bg_blue, ansi.white)
+    fill(x+2, y, w-4, 1, " ")
+    gotoxy(x+2, y) io.write(" РЕДАКТИРОВАНИЕ БАЛАНСА ")
+    resetColor()
+
+    setColor(ansi.yellow)
+    gotoxy(x+2, y+2) io.write("Игрок: " .. editingPlayer.name)
+    gotoxy(x+2, y+3) io.write("Текущий баланс Coin: " .. string.format("%.2f", editingPlayer.data.balance) .. " ₵")
+    gotoxy(x+2, y+4) io.write("Текущий баланс ЭМЫ: " .. string.format("%.2f", editingPlayer.data.emaBalance or 0) .. " ۞")
+    gotoxy(x+2, y+5) io.write(string.rep("─", w-4))
+    resetColor()
+
+    setColor(ansi.cyan)
+    gotoxy(x+2, y+6) io.write("Введите новую сумму (Coin + ЭМЫ через пробел, например \"100 50\"): ")
+    setColor(ansi.white)
+    gotoxy(x+2, y+7)
+    io.write(string.rep(" ", w-4))
+    gotoxy(x+2, y+7)
+    io.write(editInput .. "_")
+    resetColor()
+
+    setColor(ansi.white)
+    gotoxy(x+2, y+8) io.write("Enter - подтвердить | Esc - отмена | ] - выход")
+    resetColor()
+    io.flush()
+    drawing = false
+end
+
+-- Увеличенное окно для добавления предмета
+local function drawAddItemForm()
+    if drawing then return end
+    drawing = true
+    io.write(ansi.hide_cursor .. ansi.clear)
+    updateScreenSize()
+
+    local w = 70
+    local h = 15
+    local x = math.floor((screenW - w) / 2)
+    local y = math.floor((screenH - h) / 2)
+
+    setColor(ansi.white)
+    fill(x, y, w, h, " ")
+    setColor(ansi.bg_black, ansi.white)
+    for i = 0, h-1 do
+        gotoxy(x, y+i) io.write("│")
+        gotoxy(x+w-1, y+i) io.write("│")
+    end
+    fill(x+1, y, w-2, 1, "─")
+    fill(x+1, y+h-1, w-2, 1, "─")
+    setColor(ansi.bg_blue, ansi.white)
+    fill(x+2, y, w-4, 1, " ")
+    gotoxy(x+2, y) io.write(" ДОБАВЛЕНИЕ ПРЕДМЕТА В МАГАЗИН (покупка) ")
+    resetColor()
+
+    local labels = { "Internal Name:", "Display Name:", "Price Coin (число):", "Price Ema (число):", "Damage (0 = без damage):" }
+    for i = 1, 5 do
+        setColor(ansi.yellow)
+        gotoxy(x+3, y+2 + (i-1)*2)
+        io.write(labels[i])
+        setColor(ansi.cyan)
+        gotoxy(x+35, y+2 + (i-1)*2)
+        local val = addItemFields[addItemFieldNames[i]]
+        local cursor = (addItemCurrentField == i) and "█" or " "
+        io.write(val .. cursor)
+        resetColor()
+    end
+
+    setColor(ansi.white)
+    gotoxy(x+3, y+13)
+    io.write("Enter - далее / отправить | ] - отмена")
+    io.flush()
+    drawing = false
+end
+
+function drawInterface()
+    if adminMode or editBalanceMode or addItemMode or addAdminMode then return end
+    if drawing then return end
+    drawing = true
+    io.write(ansi.hide_cursor .. ansi.clear)
+    updateScreenSize()
+    
+    setColor(ansi.bg_blue, ansi.white)
+    fill(1, 2, screenW, 1, " ")
+    gotoxy(1, 2)
+    local title = " PIM MARKET SERVER – СТАТУС: " .. (marketConnected and "АКТИВЕН" or "ОЖИДАНИЕ MARKET")
+    if shopPaused then title = title .. " [ПАУЗА]" end
+    io.write(title .. string.rep(" ", screenW - #title))
+    resetColor()
+    
+    setColor(ansi.cyan)
+    gotoxy(1, 3)
+    io.write("Время: " .. getRealTimeString() .. "  До сброса репортов: " .. timeToMidnight())
+    local activeCount = 0
+    for _, v in pairs(sessions) do
+        if type(v) == "table" and v.token then activeCount = activeCount + 1 end
+    end
+    gotoxy(screenW - 25, 3)
+    io.write("Активных сессий: " .. activeCount)
+    resetColor()
+    
+    setColor(ansi.white)
+    fill(1, 4, screenW, 1, "─")
+    resetColor()
+    
+    local titles = {"👥 ИГРОКИ", "📦 ПРОДАЖИ", "🔒 БЕЗОПАСНОСТЬ", "📊 СТАТИСТИКА"}
+    setColor(ansi.bold, ansi.yellow)
+    for i=1,4 do
+        gotoxy(colX[i], 5)
+        io.write(titles[i] .. string.rep(" ", colWidth - #titles[i]))
+    end
+    resetColor()
+    
+    setColor(ansi.green)
+    local playerList = {}
+    for name, s in pairs(sessions) do
+        if type(s) == "table" and s.token then table.insert(playerList, name) end
+    end
+    local rowsAvailable = logStartY - 7
+    for i=1, math.min(rowsAvailable, #playerList) do
+        gotoxy(colX[1], 5+i)
+        local name = playerList[i]
+        if #name > colWidth then name = name:sub(1, colWidth) end
+        local isPlayerAdmin = isAdmin(name)
+        if isPlayerAdmin then
+            io.write(ansi.green .. "★ " .. name .. ansi.reset)
+        else
+            io.write(name .. string.rep(" ", colWidth - #name))
+        end
+    end
+    resetColor()
+    
+    setColor(ansi.cyan)
+    gotoxy(colX[2], 6)
+    io.write("Последние продажи:")
+    for i = 1, math.min(rowsAvailable, #sellHistory) do
+        local entry = sellHistory[#sellHistory - i + 1]
+        if entry then
+            gotoxy(colX[2], 6 + i)
+            local line = entry.name .. ": " .. entry.item .. " x" .. entry.qty
+            if unicode.len(line) > colWidth then
+                line = unicode.sub(line, 1, colWidth)
+            end
+            io.write(line)
+        end
+    end
+    resetColor()
+    
+    setColor(ansi.magenta)
+    gotoxy(colX[3], 6)
+    io.write("Лимит сессии: " .. SESSION_TIMEOUT .. " сек")
+    local playersCount = 0
+    for _ in pairs(players) do playersCount = playersCount + 1 end
+    gotoxy(colX[3], 7)
+    io.write("Игроков в БД: " .. playersCount)
+    gotoxy(colX[3], 9)
+    io.write("Активность (последние 60 мин):")
+    local graphWidth = colWidth - 2
+    local maxVal = 1
+    for i=1, ACTIVITY_SIZE do
+        if activityBuffer[i] > maxVal then maxVal = activityBuffer[i] end
+    end
+    for i=1, math.min(ACTIVITY_SIZE, graphWidth) do
+        local val = activityBuffer[(activityIndex - i + ACTIVITY_SIZE) % ACTIVITY_SIZE + 1] or 0
+        local height = math.ceil((val / (maxVal+0.01)) * 3)
+        gotoxy(colX[3]+i-1, 13 - height)
+        setColor(ansi.green)
+        io.write("█")
+        resetColor()
+    end
+    resetColor()
+    
+    setColor(ansi.yellow)
+    gotoxy(colX[4], 6)
+    io.write("Репортов: " .. globalStats.totalReports)
+    gotoxy(colX[4], 7)
+    io.write("Покупок: " .. globalStats.totalBuys)
+    gotoxy(colX[4], 8)
+    io.write("Продаж: " .. globalStats.totalSells)
+    resetColor()
+    
+    setColor(ansi.white)
+    gotoxy(1, screenH-1)
+    io.write("R - обновить | P - Пауза | A - Админ-панель")
+    resetColor()
+    
+    setColor(ansi.cyan)
+    gotoxy(1, logStartY-1)
+    io.write(string.rep("=", screenW))
+    resetColor()
+    for i=1, maxLogLines do
+        local entry = logBuffer[#logBuffer - maxLogLines + i]
+        if entry then
+            setColor(entry.color)
+            gotoxy(1, logStartY + i - 1)
+            local line = entry.text
+            if #line > screenW - 1 then line = line:sub(1, screenW-1) end
+            io.write(line .. string.rep(" ", screenW - #line))
+            resetColor()
+        end
+    end
+    io.flush()
+    drawing = false
+end
+
+local function getOrCreatePlayer(name)
+    if not players[name] then
+        players[name] = {
+            balance = 0.0,
+            emaBalance = 0.0,
+            transactions = 0,
+            regDate = getRealDateTimeString(),
+            agreed = false,
+            banned = false,
+            hasFeedback = false
+        }
+        saveDB()
+        log("SUCCESS", "🎮 Новый игрок: " .. name)
+    end
+    return players[name]
+end
+
+local function validateSession(name, token)
+    local s = sessions[name]
+    return s and s.token == token and os.time() - (s.lastAction or 0) < SESSION_TIMEOUT
+end
+
+local function handleKey(key, char, player)
+    local isPlayerAdmin = isAdmin(player)
+    local isAdminConnected = isPlayerAdmin and sessions[player] and sessions[player].token
+
+    -- Режим добавления администратора
+    if addAdminMode then
+        if char == 27 or char == 93 then -- ESC или ]
+            addAdminMode = false
+            addAdminInput = ""
+            drawAdminPanel()
+            return
+        elseif char == 13 then -- Enter
+            if addAdminInput ~= "" then
+                if addAdmin(addAdminInput) then
+                    log("SUCCESS", "👑 " .. addAdminInput .. " добавлен в администраторы")
+                    updateAdminPlayerList()
+                    drawAdminPanel()
+                else
+                    addLog("Ошибка: игрок уже является администратором", ansi.red)
+                end
+            end
+            addAdminMode = false
+            addAdminInput = ""
+            return
+        elseif char == 8 then -- Backspace
+            addAdminInput = addAdminInput:sub(1, -2)
+            drawAddAdminWindow()
+            return
+        elseif char >= 32 then
+            local c = unicode.char(char)
+            if c:match("[%w_]") then
+                addAdminInput = addAdminInput .. c
+                drawAddAdminWindow()
+            end
+            return
+        end
+        return
+    end
+
+    if addItemMode then
+        if char == 27 or char == 93 then -- ESC или ]
+            addItemMode = false
+            addItemResponse = nil
+            if adminMode then drawAdminPanel() else drawInterface() end
+            return
+        elseif char == 13 then
+            if addItemCurrentField < 5 then
+                addItemCurrentField = addItemCurrentField + 1
+                drawAddItemForm()
+                return
+            else
+                local priceCoin = tonumber(addItemFields.price_coin)
+                local priceEma = tonumber(addItemFields.price_ema)
+                if not priceCoin then priceCoin = 0 end
+                if not priceEma then priceEma = 0 end
+                if priceCoin < 0 then priceCoin = 0 end
+                if priceEma < 0 then priceEma = 0 end
+                local damage = tonumber(addItemFields.damage) or 0
+                if damage < 0 then damage = 0 end
+                if addItemFields.internal == "" or addItemFields.display == "" then
+                    addLog("Ошибка: internalName и displayName не могут быть пустыми", ansi.red)
+                    addItemMode = false
+                    drawAdminPanel()
+                    return
+                end
+                if priceCoin == 0 and priceEma == 0 then
+                    addLog("Ошибка: цена не может быть нулевой (хотя бы одна валюта >0)", ansi.red)
+                    addItemMode = false
+                    drawAdminPanel()
+                    return
+                end
+
+                local data = {
+                    op = "add_buy_item",
+                    internalName = addItemFields.internal,
+                    displayName = addItemFields.display,
+                    price_coin = priceCoin,
+                    price_ema = priceEma,
+                    damage = damage
+                }
+                
+                if next(markets) == nil then
+                    addLog("Нет подключённых терминалов market_01", ansi.red)
+                else
+                    local sent = 0
+                    for addr, _ in pairs(markets) do
+                        modem.send(addr, 0xffef, serialization.serialize(data))
+                        sent = sent + 1
+                    end
+                    addLog("Отправка предмета на " .. sent .. " терминал(ов)...", ansi.yellow)
+                    
+                    addItemResponse = nil
+                    addItemResponseTimer = os.time()
+                    while os.time() - addItemResponseTimer < 5 do
+                        event.pull(0.2)
+                        if addItemResponse then break end
+                    end
+                    if addItemResponse and addItemResponse.success then
+                        log("SUCCESS", "✅ Предмет добавлен: " .. addItemFields.display)
+                        for addr, _ in pairs(markets) do
+                            modem.send(addr, 0xffef, serialization.serialize({op = "reload_buy_items"}))
+                        end
+                        addLog("Отправлена команда перезагрузки на все терминалы", ansi.green)
+                    else
+                        addLog("Внимание: не получен ответ от терминалов, но предмет мог быть добавлен.", ansi.yellow)
+                    end
+                end
+                addItemMode = false
+                addItemResponse = nil
+                if adminMode then drawAdminPanel() else drawInterface() end
+                return
+            end
+        elseif char == 8 then
+            local field = addItemFieldNames[addItemCurrentField]
+            addItemFields[field] = addItemFields[field]:sub(1, -2)
+            drawAddItemForm()
+            return
+        elseif char >= 32 then
+            local c = unicode.char(char)
+            local field = addItemFieldNames[addItemCurrentField]
+            if field == "price_coin" or field == "price_ema" or field == "damage" then
+                if c:match("%d") or (c == "." and not addItemFields[field]:find("%.")) then
+                    addItemFields[field] = addItemFields[field] .. c
+                end
+            else
+                addItemFields[field] = addItemFields[field] .. c
+            end
+            drawAddItemForm()
+            return
+        end
+        return
+    end
+
+    if editBalanceMode then
+        if char == 27 or char == 93 then -- ESC или ]
+            editBalanceMode = false
+            editingPlayer = nil
+            editInput = ""
+            drawAdminPanel()
+            return
+        elseif char == 13 then
+            if editInput ~= "" then
+                local parts = {}
+                for part in editInput:gmatch("%S+") do
+                    table.insert(parts, part)
+                end
+                local coinVal = tonumber(parts[1])
+                local emaVal = tonumber(parts[2])
+                if coinVal then
+                    editingPlayer.data.balance = coinVal
+                end
+                if emaVal then
+                    editingPlayer.data.emaBalance = emaVal
+                end
+                log("INFO", "📊 Баланс игрока " .. editingPlayer.name .. " изменён: Coin=" .. (coinVal or editingPlayer.data.balance) .. " ₵, ЭМЫ=" .. (emaVal or editingPlayer.data.emaBalance) .. " ۞")
+                saveDB()
+            end
+            editBalanceMode = false
+            editingPlayer = nil
+            editInput = ""
+            drawAdminPanel()
+            return
+        else
+            if (char >= 48 and char <= 57) or char == 32 then
+                editInput = editInput .. string.char(char)
+            elseif char == 46 then
+                if not editInput:find("%.") then
+                    editInput = editInput .. "."
+                end
+            elseif char == 8 then
+                editInput = editInput:sub(1, -2)
+            end
+            drawEditBalanceWindow()
+            return
+        end
+    end
+
+    if adminMode then
+        if not isPlayerAdmin then
+            adminMode = false
+            drawInterface()
+            log("WARN", "Сессия администратора истекла, выход из панели")
+            return
+        end
+
+        if key == 200 then -- Вверх
+            if selectedAdminIndex > 1 then
+                selectedAdminIndex = selectedAdminIndex - 1
+                if selectedAdminIndex < adminScroll + 1 then
+                    adminScroll = math.max(0, selectedAdminIndex - 1)
+                end
+                drawAdminPanel()
+            end
+            return
+        elseif key == 208 then -- Вниз
+            if selectedAdminIndex < #adminPlayerList then
+                selectedAdminIndex = selectedAdminIndex + 1
+                if selectedAdminIndex > adminScroll + adminViewHeight then
+                    adminScroll = selectedAdminIndex - adminViewHeight
+                end
+                drawAdminPanel()
+            end
+            return
+        end
+    end
+
+    local pressed = nil
+    if char and char >= 1 and char <= 255 then
+        pressed = string.lower(string.char(char))
+    end
+
+    if not adminMode then
+        if pressed == "a" then
+            if isPlayerAdmin then
+                adminMode = true
+                adminScroll = 0
+                selectedAdminIndex = 1
+                updateAdminPlayerList()
+                log("INFO", "🔐 Админ-панель открыта")
+                drawAdminPanel()
+            else
+                log("WARN", "⚠️ Попытка входа в админ-панель не админом: " .. tostring(player))
+            end
+            return
+        elseif pressed == "p" then
+            if isPlayerAdmin then
+                shopPaused = not shopPaused
+                log("IMPORTANT", "⏸️ Магазин " .. (shopPaused and "приостановлен" or "возобновлён"))
+                drawInterface()
+            else
+                log("WARN", "⚠️ Попытка паузы магазина не админом: " .. tostring(player))
+            end
+            return
+        elseif pressed == "r" then
+            drawInterface()
+            return
+        end
+    else
+        if pressed == "p" then
+            shopPaused = not shopPaused
+            log("IMPORTANT", "⏸️ Магазин " .. (shopPaused and "приостановлен" or "возобновлён"))
+            drawAdminPanel()
+            return
+        elseif pressed == "a" then
+            adminMode = false
+            log("INFO", "🔐 Выход из админ-панели")
+            drawInterface()
+            return
+        elseif pressed == "d" then
+            local ply = adminPlayerList[selectedAdminIndex]
+            if ply then
+                ply.data.banned = not ply.data.banned
+                saveDB()
+                log("IMPORTANT", "🚫 Игрок " .. ply.name .. (ply.data.banned and " ЗАБАНЕН" or " РАЗБАНЕН"))
+                drawAdminPanel()
+            end
+            return
+        elseif pressed == "r" then
+            local ply = adminPlayerList[selectedAdminIndex]
+            if ply then
+                ply.data.transactions = 0
+                ply.data.balance = 0
+                ply.data.emaBalance = 0
+                saveDB()
+                log("INFO", "📊 Статистика игрока " .. ply.name .. " сброшена")
+                drawAdminPanel()
+            end
+            return
+        elseif pressed == "e" then
+            local ply = adminPlayerList[selectedAdminIndex]
+            if ply then
+                editingPlayer = ply
+                editInput = ""
+                editBalanceMode = true
+                drawEditBalanceWindow()
+            end
+            return
+        elseif pressed == "b" then
+            addItemMode = true
+            addItemFields = { internal = "", display = "", price_coin = "", price_ema = "0", damage = "0" }
+            addItemCurrentField = 1
+            drawAddItemForm()
+            return
+        elseif pressed == "+" then
+            addAdminMode = true
+            addAdminInput = ""
+            drawAddAdminWindow()
+            return
+        elseif pressed == "-" then
+            local ply = adminPlayerList[selectedAdminIndex]
+            if ply then
+                if removeAdmin(ply.name) then
+                    log("SUCCESS", "👑 " .. ply.name .. " удалён из администраторов")
+                    updateAdminPlayerList()
+                    drawAdminPanel()
+                else
+                    addLog("Нельзя удалить последнего администратора!", ansi.red)
+                end
+            end
+            return
+        elseif pressed == "u" then
+            broadcastUpdate()
+            return
+        elseif pressed == "k" then
+            broadcastKill()
+            return
+        end
+    end
+end
+
+local function handleTouch(x, y, player)
+    if not adminMode or editBalanceMode or addItemMode or addAdminMode then return end
+    if not isAdmin(player) then return end
+    if y >= 4 and y <= 3 + adminViewHeight then
+        local lineIndex = y - 4
+        local realIndex = adminScroll + lineIndex + 1
+        if realIndex >= 1 and realIndex <= #adminPlayerList then
+            selectedAdminIndex = realIndex
+            drawAdminPanel()
+        end
+    end
+end
+
+local function main()
+    log("SUCCESS", "🚀 Сервер запущен. Администраторы: " .. table.concat(admins, ", "))
+    drawInterface()
+
+    while true do
+        local ev = {event.pull(0.5)}
+        local etype = ev[1]
+
+        if etype == "key_down" then
+            local key = ev[4]
+            local char = ev[3]
+            local player = ev[5]
+            handleKey(key, char, player)
+        elseif etype == "touch" then
+            local x = ev[3]
+            local y = ev[4]
+            local player = ev[5]
+            handleTouch(x, y, player)
+        elseif etype == "modem_message" then
+            local from = ev[3]
+            local raw = ev[6]
+            local success, msg = pcall(serialization.unserialize, raw)
+            if not success or not msg or type(msg) ~= "table" then
+                goto continue
+            end
+
+            local last = sessions["__modem_"..from] or 0
+            if os.time() - last < 0.5 then
+                log("WARN", "Спам от " .. from)
+                goto continue
+            end
+            sessions["__modem_"..from] = os.time()
+
+            logIncoming(from, msg)
+
+            if msg.op == "register" then
+                if msg.password ~= ACCESS_PASSWORD then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Неверный пароль"}))
+                    log("WARN", "❌ Попытка подключения с неверным паролем от " .. from)
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                marketConnected = true
+                if not owner then
+                    owner = from
+                    log("SUCCESS", "🔐 АДМИН ЗАРЕГИСТРИРОВАН: " .. from)
+                end
+                if not markets[from] then
+                    markets[from] = true
+                    log("SUCCESS", "✅ Терминал подключён: " .. from)
+                end
+                modem.send(from, 0xffef, serialization.serialize({op="welcome", owner=(from==owner), shopPaused=shopPaused}))
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "enter" then
+                if shopPaused then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local playerName = msg.name
+                if not playerName or playerName == "" then
+                    log("WARN", "❌ Вход без имени от " .. from)
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local player = getOrCreatePlayer(playerName)
+                if player.banned then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Вы забанены"}))
+                    log("WARN", "🚫 Забаненный игрок пытается войти: " .. playerName)
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+
+                local existingSession = sessions[playerName]
+                local token
+                if existingSession and os.time() - (existingSession.lastAction or 0) < SESSION_TIMEOUT then
+                    token = existingSession.token
+                    existingSession.lastAction = os.time()
+                else
+                    token = tostring(math.floor(math.random() * 900000000 + 100000000))
+                    sessions[playerName] = {token = token, lastAction = os.time()}
+                    log("SUCCESS", "👤 " .. playerName .. " вошёл в систему")
+                end
+
+                modem.send(from, 0xffef, serialization.serialize({
+                    op="welcome", status="ok", token=token,
+                    balance=player.balance or 0.0,
+                    emaBalance=player.emaBalance or 0.0,
+                    transactions=player.transactions,
+                    regDate=player.regDate,
+                    agreed = player.agreed or false,
+                    shopPaused = shopPaused
+                }))
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "getAccount" then
+                if not validateSession(msg.name, msg.token) then
+                    log("WARN", "❌ Неверный токен для getAccount от " .. (msg.name or "?"))
+                    modem.send(from, 0xffef, serialization.serialize({op="accountData", error = true, message = "Токен устарел"}))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local player = players[msg.name]
+                if not player then goto continue end
+                sessions[msg.name].lastAction = os.time()
+                modem.send(from, 0xffef, serialization.serialize({
+                    op="accountData",
+                    data = {
+                        balance = player.balance,
+                        emaBalance = player.emaBalance,
+                        transactions = player.transactions,
+                        regDate = player.regDate,
+                        agreed = player.agreed,
+                        shopPaused = shopPaused
+                    }
+                }))
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "sell" then
+                if shopPaused then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                if not validateSession(msg.name, msg.token) then
+                    log("WARN", "❌ Неверный токен для sell от " .. (msg.name or "?"))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local player = players[msg.name]
+                if not player or player.banned then goto continue end
+                local qty = tonumber(msg.qty) or 0
+                local value = tonumber(msg.value) or 0
+                local internalName = msg.internalName
+
+                if internalName == "customnpcs:npcMoney" then
+                    player.emaBalance = (player.emaBalance or 0) + value
+                    log("SUCCESS", "💚 " .. msg.name .. " пополнил ЭМЫ: " .. (msg.item or "?") .. " x" .. qty .. " на " .. string.format("%.2f", value) .. " ۞")
+                else
+                    player.balance = (player.balance or 0) + value
+                    log("SUCCESS", "💰 " .. msg.name .. " пополнил Coina: " .. (msg.item or "?") .. " x" .. qty .. " на " .. string.format("%.2f", value) .. " ₵")
+                end
+                player.transactions = (player.transactions or 0) + 1
+                sessions[msg.name].lastAction = os.time()
+
+                globalStats.totalSells = (globalStats.totalSells or 0) + 1
+                saveGlobalStats()
+                saveDB()
+                recordTransaction()
+                table.insert(sellHistory, {item = msg.item, qty = qty, name = msg.name})
+                while #sellHistory > MAX_SELL_HISTORY do table.remove(sellHistory, 1) end
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "buy" then
+                if shopPaused then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Магазин на паузе"}))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                if not validateSession(msg.name, msg.token) then
+                    log("WARN", "❌ Неверный токен для buy от " .. (msg.name or "?"))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local player = players[msg.name]
+                if not player or player.banned then goto continue end
+                local value_coin = tonumber(msg.value_coin) or 0
+                local value_ema = tonumber(msg.value_ema) or 0
+
+                if player.balance < value_coin or player.emaBalance < value_ema then
+                    modem.send(from, 0xffef, serialization.serialize({op="error", message="Недостаточно средств"}))
+                    log("WARN", "❌ " .. msg.name .. " пытался купить " .. (msg.item or "?") .. " x" .. (msg.qty or 0) .. " но недостаточно средств")
+                    goto continue
+                end
+
+                player.balance = player.balance - value_coin
+                player.emaBalance = player.emaBalance - value_ema
+                player.transactions = (player.transactions or 0) + 1
+                sessions[msg.name].lastAction = os.time()
+
+                globalStats.totalBuys = (globalStats.totalBuys or 0) + 1
+                saveGlobalStats()
+                saveDB()
+                recordTransaction()
+                local priceStr = ""
+                if value_coin > 0 then priceStr = priceStr .. string.format("%.2f", value_coin) .. "₵" end
+                if value_ema > 0 then
+                    if priceStr ~= "" then priceStr = priceStr .. " + " end
+                    priceStr = priceStr .. string.format("%.2f", value_ema) .. "۞"
+                end
+                log("SUCCESS", "🛒 " .. msg.name .. " купил " .. (msg.item or "?") .. " x" .. (msg.qty or 0) .. " за " .. priceStr)
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "report" then
+                if not validateSession(msg.name, msg.token) then
+                    log("WARN", "❌ Неверный токен для report")
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                globalStats.totalReports = (globalStats.totalReports or 0) + 1
+                saveGlobalStats()
+                log("IMPORTANT", "📩 Репорт от " .. msg.name .. " (" .. msg.time .. ")")
+                log("INFO", "   Текст: " .. (msg.text or ""))
+                local file = io.open("/home/reports.log", "a")
+                if file then
+                    file:write("[" .. msg.time .. "] " .. msg.name .. ": " .. msg.text .. "\n")
+                    file:close()
+                else
+                    log("ERROR", "❌ Не удалось открыть reports.log")
+                end
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "agree" then
+                if not validateSession(msg.name, msg.token) then
+                    log("WARN", "❌ Неверный токен для agree")
+                    modem.send(from, 0xffef, serialization.serialize({ op="agree", error = true, message = "Токен устарел" }))
+                    if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                    goto continue
+                end
+                local player = players[msg.name]
+                if player then
+                    player.agreed = true
+                    saveDB()
+                    sessions[msg.name].lastAction = os.time()
+                    log("IMPORTANT", "📝 " .. msg.name .. " принял пользовательское соглашение")
+                    modem.send(from, 0xffef, serialization.serialize({ op = "agree", success = true, agreed = true }))
+                else
+                    modem.send(from, 0xffef, serialization.serialize({ op = "agree", error = true, message = "Игрок не найден" }))
+                end
+                if not adminMode and not editBalanceMode and not addItemMode then drawInterface() end
+                goto continue
+            elseif msg.op == "add_buy_item_response" then
+                addItemResponse = { success = msg.success, error = msg.error }
+                goto continue
+            elseif msg.op == "get_feedbacks" then
+                if not validateSession(msg.name, msg.token) then
+                    modem.send(from, 0xffef, serialization.serialize({op="feedbacks_list", error="Токен устарел"}))
+                    goto continue
+                end
+                local player = players[msg.name]
+                local feedbacks = {}
+                if filesystem.exists("/home/feedbacks.db") then
+                    local file = io.open("/home/feedbacks.db", "r")
+                    local data = file:read("*a")
+                    file:close()
+                    if data and #data > 0 then
+                        local ok, result = pcall(serialization.unserialize, data)
+                        if ok and type(result) == "table" then
+                            feedbacks = result
+                        end
+                    end
+                end
+                modem.send(from, 0xffef, serialization.serialize({
+                    op = "feedbacks_list",
+                    feedbacks = feedbacks,
+                    hasFeedback = player and player.hasFeedback or false
+                }))
+                goto continue
+            elseif msg.op == "add_feedback" then
+                if not validateSession(msg.name, msg.token) then
+                    modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Токен устарел"}))
+                    goto continue
+                end
+                local player = players[msg.name]
+                if not player then
+                    modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Игрок не найден"}))
+                    goto continue
+                end
+                if player.hasFeedback then
+                    modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=false, error="Вы уже оставляли отзыв"}))
+                    goto continue
+                end
+                local feedbacks = {}
+                if filesystem.exists("/home/feedbacks.db") then
+                    local file = io.open("/home/feedbacks.db", "r")
+                    local data = file:read("*a")
+                    file:close()
+                    if data and #data > 0 then
+                        local ok, result = pcall(serialization.unserialize, data)
+                        if ok and type(result) == "table" then
+                            feedbacks = result
+                        end
+                    end
+                end
+                table.insert(feedbacks, 1, {name = msg.name, text = msg.text, time = msg.time})
+                local file = io.open("/home/feedbacks.db", "w")
+                file:write(serialization.serialize(feedbacks))
+                file:close()
+                player.hasFeedback = true
+                saveDB()
+                modem.send(from, 0xffef, serialization.serialize({op="add_feedback_response", success=true}))
+                log("INFO", "📝 Новый отзыв от " .. msg.name)
+                goto continue
+            end
+        end
+        ::continue::
+    end
+end
+
 while true do
- local ev={event.pull(0.25)}local name=ev[1]
- if name=="modem_message"then local address,port,protocol,kind,keyValue=ev[3],ev[4],ev[6],ev[7],ev[8]if port==SERVER_PORT and protocol==PROTOCOL and keyValue==NETWORK_KEY then if kind=="discover"then modem.send(address,num(ev[10],CLIENT_PORT),PROTOCOL,"discover_reply",NETWORK_KEY,tostring(ev[9] or""),modem.address,SERVER_PORT,CLIENT_PORT)elseif kind=="request"then local requestId=tostring(ev[9] or"")local replyPort=math.floor(num(ev[10],CLIENT_PORT))local ok,payload=pcall(serialization.unserialize,tostring(ev[11] or""))local response if not ok or type(payload)~="table"then response={status="error",message="Повреждённый запрос"}else local handled,result=pcall(handle,address,payload)response=handled and result or{status="error",message="Ошибка сервера: "..tostring(result)}end sendChunks(address,replyPort,requestId,response)end end
- elseif name=="touch"then touch(ev[3],ev[4])
- elseif name=="scroll"then scroll(ev[5]or 0)
- elseif name=="key_down"then key(ev[3],ev[4])
- elseif name=="interrupted"then term.clear()print("VIP-SHOP MODEM SERVER остановлен")print("Modem ID: "..tostring(modem.address))print("Порт: "..SERVER_PORT)break end
- local changed=false local now=computer.uptime()for _,t in pairs(state.terminals)do local online=now-num(t.lastSeen,0)<=OFFLINE_AFTER if t.online~=online then t.online=online changed=true end end if changed or now-ui.lastDraw>2 then drawAll()end
+    local ok, err = pcall(main)
+    if not ok then
+        print("Ошибка сервера: " .. tostring(err))
+        os.sleep(5)
+    end
 end
