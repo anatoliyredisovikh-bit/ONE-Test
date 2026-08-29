@@ -1777,13 +1777,11 @@ end
 
 -- Функция отрисовки старого списка товаров (для совместимости)
 function drawBuyItemsListOld()
-  -- Это заглушка, чтобы не ломались старые вызовы
   drawProductList()
 end
 
 -- Функция отрисовки старой статики покупки (для совместимости)
 function drawBuyStaticOld()
-  -- Заглушка
   drawTopBar()
   drawMainFrames()
   drawLeftHeader()
@@ -1791,12 +1789,10 @@ end
 
 -- Функция отрисовки старой кнопки (для совместимости)
 function drawBuyButtonOld()
-  -- Заглушка
 end
 
 -- Функция отрисовки старого поля поиска (для совместимости)
 function redrawSearchFieldOld()
-  -- Заглушка
 end
 
 -- Функция отрисовки загрузки аккаунта (старая)
@@ -1825,6 +1821,7 @@ local function main()
   loadSellItems()
   filterItems()
   term.clear()
+  redrawAll()  -- <-- ИСПРАВЛЕНО: добавляем вызов отрисовки после очистки
   while true do
     local ev = {event.pull()}
     local name = ev[1]
