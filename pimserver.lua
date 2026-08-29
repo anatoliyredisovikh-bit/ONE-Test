@@ -1,7 +1,7 @@
 -- ============================================================
 -- VIP-SHOP MODEM SERVER
 -- Центральный сервер экономики + админ-панель.
--- Автоматически загружает начальный каталог из buy_items.lua
+-- Интернет-карта не используется.
 -- ============================================================
 
 local component=require("component")
@@ -19,7 +19,7 @@ if not component.isAvailable("gpu") then error("Не найдена видеок
 local modem=component.modem
 local gpu=component.gpu
 
--- Эти значения должны совпадать с клиентом.
+-- Эти значения должны совпадать с shop.lua.
 local PROTOCOL="VIPSHOP-MODEM-1"
 local NETWORK_KEY="VIPSHOP_ZOZIDO_REALM9_SECRET_2026"
 local SERVER_PORT=3410
@@ -58,69 +58,7 @@ if not filesystem.exists(DATA_DIR)then filesystem.makeDirectory(DATA_DIR)end
 local function readTable(path)if not filesystem.exists(path)then return nil end local f=io.open(path,"r")if not f then return nil end local raw=f:read("*a")f:close()local ok,v=pcall(serialization.unserialize,raw or "")if ok and type(v)=="table"then return v end return nil end
 local function atomicSave(path,value)local raw=serialization.serialize(value)local tmp=path..".tmp"local f=io.open(tmp,"w")if not f then return false,"Не открыть временный файл"end f:write(raw)f:close()if filesystem.exists(path)then pcall(filesystem.remove,BACKUP_FILE)pcall(filesystem.rename,path,BACKUP_FILE)end local ok=pcall(filesystem.rename,tmp,path)if ok and filesystem.exists(path)then return true end local out=io.open(path,"w")if not out then return false,"Не сохранить state.db"end out:write(raw)out:close()pcall(filesystem.remove,tmp)return true end
 
--- ★ НОВОЕ: функция загрузки каталога из buy_items.lua
-local function loadBuyItemsFromFile()
-    local path = "/home/buy_items.lua"
-    if not filesystem.exists(path) then return false end
-    local ok, data = pcall(dofile, path)
-    if not ok or type(data) ~= "table" then
-        print("Ошибка загрузки buy_items.lua: " .. tostring(data))
-        return false
-    end
-    -- Ожидаем, что файл возвращает массив с полями internalName, displayName, price_coin, price_ema, damage
-    local newCatalog = {}
-    for _, item in ipairs(data) do
-        if type(item) == "table" and item.internalName then
-            table.insert(newCatalog, {
-                displayName = tostring(item.displayName or item.internalName),
-                internalName = tostring(item.internalName),
-                damage = math.floor(num(item.damage, 0)),
-                priceCoin = num(item.price_coin or item.price, 0),
-                priceEma = num(item.price_ema or 0, 0),
-                article = tostring(item.article or ""),
-                enabled = true,
-                maxQty = math.floor(num(item.maxQty or item.qty, 0))
-            })
-        end
-    end
-    if #newCatalog == 0 then return false end
-    return newCatalog
-end
-
-local function defaultState()
-    local state = {
-        version=1,
-        maintenance=false,
-        buyVersion=1,
-        sellVersion=1,
-        nextTransaction=1,
-        buyCatalog={},
-        sellCatalog={},
-        users={},
-        transactions={},
-        operations={},
-        terminals={},
-        updatedAt=stamp()
-    }
-    -- ★ Загружаем каталог покупок из buy_items.lua, если он существует
-    local loaded = loadBuyItemsFromFile()
-    if loaded and #loaded > 0 then
-        state.buyCatalog = loaded
-        print("✅ Загружен каталог покупок из buy_items.lua, позиций: " .. #loaded)
-    else
-        -- Если файла нет или он пуст, создаём тестовый товар
-        state.buyCatalog = {
-            {displayName="Алмаз", internalName="minecraft:diamond", damage=0, priceCoin=10, priceEma=0, article="#VIP-001", enabled=true, maxQty=0},
-        }
-        print("⚠️ buy_items.lua не найден или пуст, создан тестовый каталог")
-    end
-    -- Тестовый каталог продаж (можно тоже загрузить из файла позже)
-    state.sellCatalog = {
-        {displayName="Железный слиток", internalName="minecraft:iron_ingot", damage=0, priceCoin=1, priceEma=0, article="#SELL-001", enabled=true, maxQty=0},
-    }
-    return state
-end
-
+local function defaultState()return{version=1,maintenance=false,buyVersion=1,sellVersion=1,nextTransaction=1,buyCatalog={{displayName="Алмаз",internalName="minecraft:diamond",damage=0,priceCoin=10,priceEma=0,article="#VIP-001",enabled=true}},sellCatalog={{displayName="Железный слиток",internalName="minecraft:iron_ingot",damage=0,priceCoin=1,priceEma=0,article="#SELL-001",enabled=true}},users={},transactions={},operations={},terminals={},updatedAt=stamp()}end
 local state=readTable(STATE_FILE)or defaultState()
 state.buyCatalog=type(state.buyCatalog)=="table"and state.buyCatalog or{}
 state.sellCatalog=type(state.sellCatalog)=="table"and state.sellCatalog or{}
