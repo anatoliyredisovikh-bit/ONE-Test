@@ -1,7 +1,7 @@
--- ============================================================
--- VIPCLIENT – клиент для VIP-SHOP MODEM SERVER (исправлен)
--- Версия 5.4 – максимально простой, без ошибок
--- ============================================================
+-- =====================================================================
+-- PIM MARKET (ЛОКАЛЬНАЯ ВЕРСИЯ) – АБСОЛЮТНО ПОЛНЫЙ КОД
+-- Без веб-интеграции, с новым интерфейсом admin_shop и всеми старыми UI
+-- =====================================================================
 
 local component = require("component")
 local gpu = component.gpu
@@ -9,237 +9,357 @@ local term = require("term")
 local event = require("event")
 local keyboard = require("keyboard")
 local unicode = require("unicode")
-local computer = require("computer")
 local serialization = require("serialization")
 local fs = require("filesystem")
+local computer = require("computer")
+local os = require("os")
 
-if not component.isAvailable("modem") then error("Модем не найден",0) end
-if not component.isAvailable("gpu") then error("Видеокарта не найдена",0) end
-
-local modem = component.modem
-local gpu = component.gpu
-
--- ============================================================
---  АДРЕС СЕРВЕРА (фиксированный)
--- ============================================================
-local SERVER_ADDRESS = "592322fc-e0b7-4406-8d04-22d4e8be95b6"
-local serverAddress = SERVER_ADDRESS
-
-local PROTOCOL = "VIPSHOP-MODEM-1"
-local NETWORK_KEY = "VIPSHOP_ZOZIDO_REALM9_SECRET_2026"
-local SERVER_PORT = 3410
-local CLIENT_PORT = 3411
-local CHUNK_SIZE = 6000
-
-local pendingRequests = {}
-
-local function writeDebugLog(msg)
-    pcall(function()
-        local file = io.open("/home/vipclient_debug.log", "a")
-        if file then
-            file:write("[" .. os.date("%H:%M:%S") .. "] " .. tostring(msg) .. "\n")
-            file:close()
-        end
-    end)
+-- =====================================================================
+-- НАСТРОЙКА ЭКРАНА
+-- =====================================================================
+local WIDTH, HEIGHT = gpu.getResolution()
+local maxW, maxH = gpu.maxResolution()
+if WIDTH < maxW or HEIGHT < maxH then
+  gpu.setResolution(maxW, maxH)
+  WIDTH, HEIGHT = gpu.getResolution()
 end
 
-local function sendRequest(action, payload, callback)
-    if not serverAddress then
-        if callback then callback({status="error", message="Адрес сервера не задан"}) end
-        return
-    end
+-- =====================================================================
+-- ЦВЕТА (объединены из admin_shop и pimmarket)
+-- =====================================================================
+local C = {
+  bg = 0x0C0C0C,
+  white = 0xFFFFFF,
+  gray = 0xAAAAAA,
+  darkGray = 0x555555,
+  green = 0x55FF55,
+  yellow = 0xFFFF55,
+  red = 0xFF5555,
+  cyan = 0x55FFFF,
+  selectedBg = 0x002440,
+  selectedName = 0x00e6b1,
+  star = 0x077d42,
+  vipTitle = 0x0c9a76,
+  underLine = 0x428A72,
+  mainLine = 0x7FFFD4,
+  sectionLine = 0x27BDEC,
+  headerBg = 0x1A2D33,
+  notFound = 0xF50016,
+  buttonBuy = 0x0a502d,
+  buttonClear = 0x8b1a1a,
+  buttonSales = 0x1a5a6b,
+  inputBg = 0x1a1a1a,
+  inputFg = 0xFFFFFF,
+  accent = 0x0c9a76,
+  frame = 0x27BDEC,
+  bg_main = 0x0A0A0F,
+  bg_secondary = 0x14141F,
+  bg_button = 0x1F1F2E,
+  bg_input = 0x282828,
+  accent_main = 0x8B5CF6,
+  accent_secondary = 0x00E5C9,
+  text_main = 0xD0D0E0,
+  text_bright = 0xF0F0FF,
+  success = 0x00FFAA,
+  error = 0xFF4D7A,
+  inactive = 0x555566,
+  star_glow = 0xC8C8FF,
+  black_fon = 0x000000,
+  tomato = 0xFF6347,
+  green_bright = 0x3BFF18,
+  gold = 0xFFD700,
+}
 
-    local requestId = tostring(os.time()) .. tostring(math.random(1000, 9999))
-    payload.action = action
-    payload.terminalId = "VIPCLIENT-" .. tostring(computer.address():sub(1,8))
+-- =====================================================================
+-- ПЕРЕМЕННЫЕ ДЛЯ СТАРЫХ UI-ФУНКЦИЙ (чтобы они не падали)
+-- =====================================================================
+currentScreen = "menu"           -- используется в старых функциях
+shopPaused = false
+feedbacksPage = 1
+feedbacksTotalPages = 1
+playerHasFeedback = false
+showSellPopup = false
+showPartialPopup = false
+showInsufficientPopup = false
+showInventoryFullPopup = false
+showShopDenied = false
+reportInput = ""
+feedbackInput = ""
+feedbackEditMode = false
+feedbackRating = 5
+selectedItem = nil
+hoveredIndex = 0
+purchaseQuantity = 1
+purchaseItem = nil
+sellConfirmItem = nil
+foundAmount = 0
+partialExtracted = 0
+partialRequested = 0
+partialRefundCoin = 0
+partialRefundEma = 0
+insufficientBalanceCoin = 0
+insufficientBalanceEma = 0
+tempMessage = ""
+tempMessageTimer = nil
 
-    local data = serialization.serialize(payload)
+-- =====================================================================
+-- ДЕКОРАТИВНЫЕ ПЕРЕМЕННЫЕ ИЗ СТАРЫХ UI (сохранены полностью)
+-- =====================================================================
+local diamond = {
+  "             ▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓            ",
+  "           ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▒▒▒▒▓          ",
+  "        ▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓        ",
+  "      ▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▒▒▒▒▒▒▒▒▒▓      ",
+  "     ▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▒▒▒▒▒▒▒▒▒▒▓▓▓▓▒▒▒▒▓▓▓▒▒     ",
+  "     ▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓▓▒▒▒▒▒▒▓▓      ",
+  "       ▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓▓       ",
+  "        ▓▓▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▓▓▓▓▓▒▓▓▓▓         ",
+  "          ▓▒▒▒▒▒▒▒▒▓▓▓▒▒▒▒▒▓▓▓▓▓▓▓▓▓▓▓          ",
+  "            ▓▒▒▒▒▒▓▓▓▓▓▒▒▓▓▓▓▓▓▓▓▓▓▓            ",
+  "             ▓▒▒▒▒▒▓▓▓▓▒▒▓▓▓▓▓▒▓▓▓▓             ",
+  "               ▓▒▒▒▒▓▓▓▒▒▓▓▓▓▓▓▓▓               ",
+  "                 ▓▒▒▒▓▓▒▒▓▓▓▓▓▓▓                ",
+  "                  ▓▒▒▒▓▓▒▓▓▓▓▓                  ",
+  "                    ▓▒▒▒▒▓▒▓▓                   ",
+  "                      ▓▒▒▒▓▓                    ",
+  "                        ▒▓                      ",
+}
 
-    pendingRequests[requestId] = {
-        chunks = {},
-        total = 0,
-        received = 0,
-        callback = callback,
-        completed = false,
-        timer = nil
-    }
+local gradient = {
+  0x003D33, 0x005A4C, 0x007A66, 0x009980,
+  0x00B899, 0x00D4B3, 0x00E5C9, 0x33FFD6,
+}
 
-    local timer = event.timer(5, function()
-        local req = pendingRequests[requestId]
-        if req and not req.completed then
-            req.completed = true
-            pendingRequests[requestId] = nil
-            if req.callback then
-                req.callback({status="error", message="Таймаут ответа сервера"})
-            end
-        end
-    end)
-    pendingRequests[requestId].timer = timer
+local asciiQR = [[
+█████████████████████████████████████████████████████████████████████
+█████████████████████████████████████████████████████████████████████
+██████░░░░░░░░░░███████░██░░██████░██████░░░░██░░░███░░░░░░░░░░██████
+████░░█████████░░████████░████░░██░░░██░░░░██░░░████░░█████████░░████
+████░░██░░░░░██░░██████░░░████████░████░░░░████░████░░██░░░░░██░░████
+████░░██░░░░░██░░████░░███░░██░░░░███████░░██░░░████░░██░░░░░██░░████
+████░░██░░░░░██░░████░░░████████████░░░██░░██░░░████░░██░░░░░██░░████
+████░░█████████░░███████░░░░░░░░░░░██░░░░██░░███░░██░░█████████░░████
+█████░░░░░░░░░░░███░░██░██░░██░░██░██░░██░░██░██░░███░░░░░░░░░░░█████
+███████████████████████░██░░░░░░░░░░░██░░░░███░░█████████████████████
+████████░░░░███░░████░░░░░░░██░░███░░████░░░░███░░░░░░██░████████████
+████████░░░░░░░██████░░░░░██░░░░░░█░░░░██████░░░██░░░░███████░░░░████
+██████░░░░██░██░░░░█████░░░░████░░░██░░░░░░░░░░░░░██░░███████░░░░████
+████████████░████████░░░█████████████████████░██████░░░░░░░██████████
+████░░██████░░░░░░░██░░██████████████████████░░░░░░░██░░█████████████
+████████░░██░██████░░██████░░░██████████████████░░████░░░██░░████████
+██████░░░░░░░██░░██░░██░█████░░░░░░░░░░░██████████░░░░█████░░████████
+████░░████░░█████████░░░██████░░░░░░░░░██████░████░░████░░░████░░████
+██████████░░█░░░░░░████████████░░░░░░░████████░░░░██░░░░░░░██████████
+█████████████░░██░░░░░░███████░░█████████████░░░████░░░░░██░░░░██████
+████░░██░░██░░░░░░░██░░░████████████████████████████████░██░░████████
+████░░░░█████████░░██░░░██████░░█████░░██████░████░░░░░░░████░░██████
+████░░░░████░░░░░██░░░░██████████████████████░████░░█████░░░░████████
+████░░██░░███░░██████░░░██████████████████████████░░███████░░██░░████
+████████████░░░░░██████░████░░░░░░░░░░░████░░░██████░░░░█░░░░░░░░████
+██████░░███████████░░░░░██░░░░████░████░░████░░░░░░░██░░█████░░░░████
+████░░██████░░░░░░░░░███░░██░░█████░░██░░░░░░░░░░░░░░░░░░████░░░░████
+███████████████████░░█████░░██░░░░░░░░░░░░░██░██░░██████░██░░░░██████
+█████░░░░░░░░░░░███░░░░░██░░░░██░░░░░░░██████░░░░░██░░██░░░░░████████
+████░░█████████░░████░░░░░░░░░████░████████░░░██░░██████░██░░░░░░████
+████░░██░░░░░██░░█████████░░██████░██░░░░░░████░░░░░░░░░░░░░░░░██████
+████░░██░░░░░██░░██░░███░░██░░░░░░█░░████░░░░███░░████░░█████████████
+████░░██░░░░░██░░██░░███████████░░░██░░██░░██░░░░░░░░░░░░░░░░░░░░████
+████░░█████████░░██████░░░██░░███████░░████░░█░░░░░░░░░░░░░░░░░░░████
+██████░░░░░░░░░░████████░░████████░██░░███████░░░░░░░░░░░░░░░░░░░████
+█████████████████████████████████████████████████████████████████████
+█████████████████████████████████████████████████████████████████████
+]]
 
-    modem.send(serverAddress, SERVER_PORT, PROTOCOL, "request", NETWORK_KEY, requestId, CLIENT_PORT, data)
-    writeDebugLog("📤 Запрос " .. action .. " (ID=" .. requestId .. ")")
+-- Кнопки меню (старые)
+local menuButtons = {
+  shop    = {x=32, xs=20, y=9,  ys=3, text="🛒 Магазин",     tx=6, ty=1, bg=C.bg_button, fg=C.accent_main},
+  account = {x=32, xs=20, y=17, ys=3, text="👤 Аккаунт",      tx=6, ty=1, bg=C.bg_button, fg=C.accent_main}
+}
+
+local shopMenuButtons = {
+  buy    = {x=32, xs=20, y=9,  ys=3, text="🛍 Покупка",     tx=6, ty=1, bg=C.bg_button, fg=C.accent_main},
+  sell   = {x=32, xs=20, y=17, ys=3, text="💰 Пополнение",  tx=5, ty=1, bg=C.bg_button, fg=C.accent_main},
+}
+
+-- =====================================================================
+-- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ UI (из admin_shop и pimmarket)
+-- =====================================================================
+local function setBG(c) gpu.setBackground(c) end
+local function setFG(c) gpu.setForeground(c) end
+
+local function fill(x, y, w, h, c)
+  setBG(c)
+  gpu.fill(x, y, w, h, " ")
 end
 
-local function processChunk(requestId, chunk, total, index)
-    local req = pendingRequests[requestId]
-    if not req or req.completed then return end
-
-    req.chunks[index] = chunk
-    req.total = total
-    req.received = req.received + 1
-
-    if req.received == total then
-        local full = table.concat(req.chunks)
-        local ok, response = pcall(serialization.unserialize, full)
-        req.completed = true
-        pendingRequests[requestId] = nil
-        if req.timer then event.cancel(req.timer) end
-
-        if ok and type(response) == "table" then
-            if req.callback then req.callback(response) end
-        else
-            if req.callback then req.callback({status="error", message="Повреждённый ответ"}) end
-        end
-    end
+local function text(x, y, str, fg, bg)
+  if bg then setBG(bg) end
+  if fg then setFG(fg) end
+  gpu.set(x, y, str)
 end
 
-modem.open(CLIENT_PORT)
-
-local function handlePush(action, data)
-    writeDebugLog("📩 Push: " .. tostring(action))
-    if action == "user_updated" then
-        if data.player == currentPlayer then
-            local user = data.user or {}
-            coinBalance = user.balanceCoin or coinBalance
-            emaBalance = user.balanceEma or emaBalance
-            playerTransactions = user.transactions or playerTransactions
-            playerAgreed = user.agreed or playerAgreed
-            playerBanned = user.banned or false
-            banReason = user.banReason or nil
-            if currentScreen == "shop" then
-                drawAccountInfo()
-                drawBalanceLine(3,1)
-            end
-        end
-    elseif action == "catalog_updated" then
-        if data.catalog == "buy" or data.catalog == "sell" then
-            loadCatalog(data.catalog, true)
-        end
-    elseif action == "maintenance_changed" then
-        shopPaused = data.maintenance == true
-        if shopPaused then
-            showTempMessage("Магазин закрыт на техобслуживание", 3)
-            currentScreen = "menu"
-            drawMainMenu()
-        end
-    end
+local function sectionHeader(x, y, w, title, lineColor, titleColor)
+  lineColor = lineColor or C.sectionLine
+  titleColor = titleColor or C.white
+  setBG(C.bg)
+  setFG(lineColor)
+  gpu.set(x, y, string.rep("-", w))
+  setFG(titleColor)
+  gpu.set(x + 1, y, title)
 end
 
-local function sendRequestSync(action, payload, timeout)
-    timeout = timeout or 5
-    local done = false
-    local result = nil
-
-    sendRequest(action, payload, function(response)
-        result = response
-        done = true
-    end)
-
-    local start = computer.uptime()
-    while not done and computer.uptime() - start < timeout do
-        event.pull(0.05)
-    end
-
-    if not done then
-        return {status="error", message="Таймаут ожидания ответа"}
-    end
-    return result or {status="error", message="Нет ответа"}
+local function truncate(str, maxLen)
+  if #str <= maxLen then return str end
+  return str:sub(1, maxLen - 3) .. "..."
 end
 
--- ============================================================
---  ОСНОВНЫЕ ПЕРЕМЕННЫЕ
--- ============================================================
+local function sortableName(name)
+  if not name then return "" end
+  local lower = string.lower(name)
+  local result = lower:gsub("(%d+)", function(d)
+    return string.format("%08d", tonumber(d))
+  end)
+  return result
+end
+
+local function toLowerCase(str)
+  if not str then return "" end
+  str = string.lower(str)
+  str = str:gsub("А", "а"):gsub("Б", "б"):gsub("В", "в"):gsub("Г", "г"):gsub("Д", "д")
+  str = str:gsub("Е", "е"):gsub("Ё", "ё"):gsub("Ж", "ж"):gsub("З", "з"):gsub("И", "и")
+  str = str:gsub("Й", "й"):gsub("К", "к"):gsub("Л", "л"):gsub("М", "м"):gsub("Н", "н")
+  str = str:gsub("О", "о"):gsub("П", "п"):gsub("Р", "р"):gsub("С", "с"):gsub("Т", "т")
+  str = str:gsub("У", "у"):gsub("Ф", "ф"):gsub("Х", "х"):gsub("Ц", "ц"):gsub("Ч", "ч")
+  str = str:gsub("Ш", "ш"):gsub("Щ", "щ"):gsub("Ъ", "ъ"):gsub("Ы", "ы"):gsub("Ь", "ь")
+  str = str:gsub("Э", "э"):gsub("Ю", "ю"):gsub("Я", "я")
+  return str
+end
+
+-- Общие функции для отрисовки
+function clear()
+  gpu.setBackground(C.bg_main)
+  gpu.fill(1, 1, 80, 25, " ")
+end
+
+function drawCenteredText(y, text, color)
+  if not text then text = "" end
+  gpu.setForeground(color or C.text_main)
+  local x = math.floor((80 - unicode.len(text)) / 2) + 1
+  gpu.set(x, y, text)
+end
+
+function drawButton(btn)
+  if not btn then return end
+  gpu.setBackground(btn.bg)
+  gpu.fill(btn.x, btn.y, btn.xs, btn.ys, " ")
+  gpu.setForeground(btn.fg)
+  local txt = btn.text or ""
+  local tx = btn.x + math.floor((btn.xs - unicode.len(txt)) / 2)
+  local ty = btn.y + math.floor((btn.ys - 1) / 2)
+  gpu.set(tx, ty, txt)
+  gpu.setBackground(C.bg_main)
+end
+
+function drawFlexButton(btn) drawButton(btn) end
+
+function drawScreenBorder()
+  local left, right, top, bottom = 1, 80, 1, 24
+  gpu.setForeground(C.accent_secondary)
+  gpu.fill(left, top, right - left + 1, 1, "─")
+  gpu.fill(left, bottom, right - left + 1, 1, "─")
+  for y = top + 1, bottom - 1 do
+    gpu.set(left, y, "│")
+    gpu.set(right, y, "│")
+  end
+  gpu.set(left, top, "┌")
+  gpu.set(right, top, "┐")
+  gpu.set(left, bottom, "└")
+  gpu.set(right, bottom, "┘")
+end
+
+function drawBalanceLine(x, y)
+  local coin = coinBalance or 0
+  local ema = emaBalance or 0
+  gpu.setForeground(C.white)
+  gpu.set(x, y, "Баланс: ")
+  local coinStr = string.format("%.2f", coin) .. " Coina ₵"
+  gpu.setForeground(C.accent_main)
+  gpu.set(x + unicode.len("Баланс: "), y, coinStr)
+  gpu.setForeground(C.white)
+  gpu.set(x + unicode.len("Баланс: ") + unicode.len(coinStr), y, " | ")
+  local emaStr = "ЭМЫ: " .. string.format("%.2f", ema) .. " ۞"
+  gpu.setForeground(C.tomato)
+  gpu.set(x + unicode.len("Баланс: ") + unicode.len(coinStr) + unicode.len(" | "), y, emaStr)
+end
+
+function drawTempMessage()
+  if tempMessage ~= "" and tempMessage then
+    gpu.setBackground(C.bg_main)
+    gpu.fill(1, 25, 80, 1, " ")
+    gpu.setForeground(C.success)
+    local x = math.floor((80 - unicode.len(tempMessage)) / 2) + 1
+    gpu.set(x, 25, tempMessage)
+  else
+    gpu.setBackground(C.bg_main)
+    gpu.fill(1, 25, 80, 1, " ")
+  end
+end
+
+function showTempMessage(msg, duration)
+  tempMessage = msg or ""
+  if tempMessageTimer then
+    event.cancel(tempMessageTimer)
+  end
+  tempMessageTimer = event.timer(duration or 2, function()
+    tempMessage = ""
+    tempMessageTimer = nil
+    drawTempMessage()
+  end)
+  drawTempMessage()
+end
+
+function isButtonClicked(btn, x, y)
+  if not btn then return false end
+  return y >= btn.y and y < btn.y + btn.ys and x >= btn.x and x < btn.x + btn.xs
+end
+
+-- =====================================================================
+-- ПУТИ К ФАЙЛАМ
+-- =====================================================================
+local DB_PATH = "/home/players.db"
+local BUY_ITEMS_PATH = "/home/buy_items.lua"
+local SELL_ITEMS_PATH = "/home/shop_items.lua"
+
+-- =====================================================================
+-- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ СОСТОЯНИЯ (для нового интерфейса)
+-- =====================================================================
 local currentPlayer = nil
 local coinBalance = 0.0
 local emaBalance = 0.0
 local playerTransactions = 0
 local playerRegDate = ""
 local playerAgreed = false
-local playerBanned = false
-local banReason = ""
-local shopPaused = false
 
-local buyCatalog = {}
-local sellCatalog = {}
-local catalogMode = "buy"
-local buyVersion = 0
-local sellVersion = 0
+local shopMode = "buy"             -- "buy" или "sell"
+local allBuyItems = {}
+local allSellItems = {}
+local displayedItems = {}
 
--- UI
-local WIDTH, HEIGHT = gpu.getResolution()
-local maxW, maxH = gpu.maxResolution()
-if WIDTH < maxW or HEIGHT < maxH then
-    gpu.setResolution(maxW, maxH)
-    WIDTH, HEIGHT = gpu.getResolution()
-end
+local selectedIndex = 1
+local scrollOffset = 0
+local searchQuery = ""
+local searchFocused = false
+local quantity = ""
 
-local C = {
-    bg = 0x0C0C0C, white = 0xFFFFFF, gray = 0xAAAAAA, darkGray = 0x555555,
-    green = 0x55FF55, yellow = 0xFFFF55, red = 0xFF5555, cyan = 0x55FFFF,
-    selectedBg = 0x002440, selectedName = 0x00e6b1, star = 0x077d42,
-    vipTitle = 0x0c9a76, underLine = 0x428A72, mainLine = 0x7FFFD4,
-    sectionLine = 0x27BDEC, headerBg = 0x1A2D33, notFound = 0xF50016,
-    buttonBuy = 0x0a502d, buttonClear = 0x8b1a1a, buttonSales = 0x1a5a6b,
-    inputBg = 0x1a1a1a, inputFg = 0xFFFFFF, accent = 0x0c9a76, frame = 0x27BDEC,
+local account = {
+  nick = "",
+  coina = "0",
+  ema = "0",
+  regDate = "",
+  trans = "0",
 }
 
-local function setBG(c) gpu.setBackground(c) end
-local function setFG(c) gpu.setForeground(c) end
-local function fill(x, y, w, h, c) setBG(c) gpu.fill(x, y, w, h, " ") end
-local function text(x, y, str, fg, bg)
-    if bg then setBG(bg) end
-    if fg then setFG(fg) end
-    gpu.set(x, y, str)
-end
-local function sectionHeader(x, y, w, title, lineColor, titleColor)
-    lineColor = lineColor or C.sectionLine
-    titleColor = titleColor or C.white
-    setBG(C.bg) setFG(lineColor)
-    gpu.set(x, y, string.rep("-", w))
-    setFG(titleColor)
-    gpu.set(x + 1, y, title)
-end
-local function truncate(str, maxLen)
-    if #str <= maxLen then return str end
-    return str:sub(1, maxLen - 3) .. "..."
-end
-local function lowerText(str)
-    str = tostring(str or "")
-    if unicode.lower then return unicode.lower(str) end
-    return string.lower(str)
-end
-local function trimNumber(value, decimals)
-    local n = tonumber(value) or 0
-    if n == math.floor(n) then return tostring(math.floor(n)) end
-    local result = string.format("%." .. tostring(decimals or 4) .. "f", n)
-    result = result:gsub("0+$", ""):gsub("%.$", "")
-    return result
-end
-local function formatQuantity(value)
-    local n = tonumber(value) or 0
-    if n >= 1000000000 then return trimNumber(n / 1000000000, 1) .. "b" end
-    if n >= 1000000 then return trimNumber(n / 1000000, 1) .. "m" end
-    if n >= 1000 then return trimNumber(n / 1000, 1) .. "k" end
-    return tostring(math.floor(n))
-end
-local function sortableName(name)
-    if not name then return "" end
-    local lower = string.lower(name)
-    local result = lower:gsub("(%d+)", function(d) return string.format("%08d", tonumber(d)) end)
-    return result
-end
-
--- Разметка UI
+-- Размеры интерфейса (из admin_shop)
 local TOP_H = 3
 local BOT_H = 3
 local MAIN_Y = 4
@@ -265,794 +385,1509 @@ local BTN_Y = TOTAL_Y + 2
 local ACC_Y = BTN_Y + 3
 local BOT_Y = HEIGHT - 2
 
-local allItems = {}
-local items = {}
-local selectedIndex = 1
-local scrollOffset = 0
-local quantity = ""
-local searchQuery = ""
-local searchFocused = false
-local qtyFocused = false
+-- =====================================================================
+-- ЗАГРУЗКА / СОХРАНЕНИЕ ДАННЫХ
+-- =====================================================================
+local function ensureFile(path, default)
+  if not fs.exists(path) then
+    local file = io.open(path, "w")
+    if file then
+      if type(default) == "table" then
+        file:write(serialization.serialize(default))
+      else
+        file:write(default)
+      end
+      file:close()
+      return true
+    end
+    return false
+  end
+  return true
+end
 
--- PIM и ME
+ensureFile(DB_PATH, {})
+
+local players = {}
+
+local function loadPlayers()
+  local file = io.open(DB_PATH, "r")
+  if file then
+    local raw = file:read("*a")
+    file:close()
+    if raw and #raw > 0 then
+      local ok, data = pcall(serialization.unserialize, raw)
+      if ok and type(data) == "table" then
+        players = data
+        return
+      end
+    end
+  end
+  players = {}
+end
+
+local function savePlayers()
+  local file = io.open(DB_PATH, "w")
+  if file then
+    file:write(serialization.serialize(players))
+    file:close()
+    return true
+  end
+  return false
+end
+
+local function getOrCreatePlayer(name)
+  if not name or name == "" then return nil end
+  if not players[name] then
+    players[name] = {
+      balance = 0.0,
+      emaBalance = 0.0,
+      transactions = 0,
+      regDate = os.date("%d.%m.%Y %H:%M:%S"),
+      agreed = false,
+    }
+    savePlayers()
+  end
+  return players[name]
+end
+
+local function loadBuyItems()
+  if fs.exists(BUY_ITEMS_PATH) then
+    local ok, data = pcall(dofile, BUY_ITEMS_PATH)
+    if ok and type(data) == "table" then
+      allBuyItems = data
+      if component.isAvailable("me_interface") then
+        local me = component.me_interface
+        local rawItems = me.getItemsInNetwork()
+        local meQuantities = {}
+        for _, meItem in ipairs(rawItems) do
+          local key = meItem.name .. ":" .. (meItem.damage or 0)
+          meQuantities[key] = meItem.size or 0
+        end
+        for _, item in ipairs(allBuyItems) do
+          local key = item.internalName .. ":" .. (item.damage or 0)
+          item.qty = meQuantities[key] or 0
+        end
+      else
+        for _, item in ipairs(allBuyItems) do item.qty = 0 end
+      end
+      return
+    end
+  end
+  allBuyItems = {}
+end
+
+local function loadSellItems()
+  if fs.exists(SELL_ITEMS_PATH) then
+    local ok, data = pcall(dofile, SELL_ITEMS_PATH)
+    if ok and type(data) == "table" and data.sellItems then
+      allSellItems = data.sellItems
+      for _, item in ipairs(allSellItems) do item.qty = 0 end
+      return
+    end
+  end
+  allSellItems = {}
+end
+
+-- =====================================================================
+-- РАБОТА С PIM И ME
+-- =====================================================================
 local function getPimAddr()
-    for addr in component.list("pim") do return addr end
-    return nil
-end
-
-local function getMeAddr()
-    for addr in component.list("me_interface") do return addr end
-    return nil
-end
-
-local function getPimProxy()
-    local addr = getPimAddr()
-    if not addr then return nil end
-    local ok, proxy = pcall(component.proxy, addr)
-    if ok then return proxy end
-    return nil
+  for addr in component.list("pim") do
+    return addr
+  end
+  return nil
 end
 
 local function getPlayerOnPim()
-    local pim = getPimProxy()
-    if not pim then return nil end
-    local methods = {"getPlayer", "getPlayerName", "getUsername"}
-    for _, method in ipairs(methods) do
-        if type(pim[method]) == "function" then
-            local ok, name = pcall(pim[method], pim)
-            if ok and name and name ~= "" then return name end
-        end
-    end
-    return nil
+  local pimAddr = getPimAddr()
+  if not pimAddr then return nil end
+  local pim = component.proxy(pimAddr)
+  local player = nil
+  if pim.getPlayer then
+    local ok, result = pcall(pim.getPlayer, pim)
+    if ok and result and result ~= "" then player = result end
+  end
+  if not player and pim.getPlayerName then
+    local ok, result = pcall(pim.getPlayerName, pim)
+    if ok and result and result ~= "" then player = result end
+  end
+  if not player and pim.getUsername then
+    local ok, result = pcall(pim.getUsername, pim)
+    if ok and result and result ~= "" then player = result end
+  end
+  if not player then
+    local ok, result = pcall(function() return pim.player end)
+    if ok and result and result ~= "" then player = result end
+  end
+  return player
 end
 
-local function isPlayerOnPim()
-    local pim = getPimProxy()
-    if not pim then return false end
-    if type(pim.getInventorySize) == "function" then
-        local ok, size = pcall(pim.getInventorySize, pim)
-        if ok and tonumber(size) and tonumber(size) > 0 then return true end
+local function getActualItemQuantity(internalName, damage)
+  if not component.isAvailable("me_interface") then return 0 end
+  local me = component.me_interface
+  local items = me.getItemsInNetwork()
+  local total = 0
+  for _, meItem in ipairs(items) do
+    if meItem.name == internalName and (meItem.damage or 0) == (damage or 0) then
+      total = total + (meItem.size or 0)
     end
-    return getPlayerOnPim() ~= nil
+  end
+  return total
 end
 
-local function scanPlayerInventory(targetName, targetDamage)
-    local pim = getPimProxy()
-    if not pim then return 0 end
-    targetDamage = tonumber(targetDamage) or 0
-    local total = 0
-    for slot = 1, 36 do
-        local stack = nil
-        if type(pim.getStackInSlot) == "function" then
-            local ok, st = pcall(pim.getStackInSlot, pim, slot)
-            if ok then stack = st end
+local function scanPlayerInventory(internalName, damage)
+  local pimAddr = getPimAddr()
+  if not pimAddr then return 0 end
+  local pim = component.proxy(pimAddr)
+  local total = 0
+  for slot = 1, 36 do
+    local stack = pim.getStackInSlot(slot)
+    if stack then
+      local qty = stack.size or stack.qty or 0
+      if qty > 0 then
+        local rawName = stack.name or stack.label or ""
+        local cleanName = rawName:gsub("§.", "")
+        local dmg = stack.damage or 0
+        if cleanName == internalName and dmg == (damage or 0) then
+          total = total + qty
         end
-        if stack then
-            local qty = tonumber(stack.size or stack.qty or 0) or 0
-            if qty > 0 then
-                local name = stack.name or stack.id or ""
-                local damage = tonumber(stack.damage or stack.dmg or 0) or 0
-                if name:lower() == targetName:lower() and damage == targetDamage then
-                    total = total + qty
-                end
+      end
+    end
+  end
+  return total
+end
+
+local function extractToME(internalName, amount, damage)
+  local pimAddr = getPimAddr()
+  if not pimAddr or amount <= 0 then return 0 end
+  local pim = component.proxy(pimAddr)
+  local extracted = 0
+  for slot = 1, 36 do
+    if extracted >= amount then break end
+    local stack = pim.getStackInSlot(slot)
+    if stack then
+      local qty = stack.size or stack.qty or 0
+      if qty > 0 then
+        local rawName = stack.name or stack.label or ""
+        local cleanName = rawName:gsub("§.", "")
+        local dmg = stack.damage or 0
+        if cleanName == internalName and dmg == (damage or 0) then
+          local toTake = math.min(qty, amount - extracted)
+          if toTake > 0 then
+            local moved = pim.pushItem("up", slot, toTake)
+            if type(moved) == "number" and moved > 0 then
+              extracted = extracted + moved
             end
+          end
         end
+      end
     end
-    return total
+  end
+  return extracted
 end
 
-local function extractToME(targetName, amount, targetDamage)
-    local pim = getPimProxy()
-    if not pim or amount <= 0 then return 0 end
-    targetDamage = tonumber(targetDamage) or 0
-    local extracted = 0
-    for slot = 1, 36 do
-        if extracted >= amount then break end
-        local stack = nil
-        if type(pim.getStackInSlot) == "function" then
-            local ok, st = pcall(pim.getStackInSlot, pim, slot)
-            if ok then stack = st end
-        end
-        if stack then
-            local qty = tonumber(stack.size or stack.qty or 0) or 0
-            if qty > 0 then
-                local name = stack.name or stack.id or ""
-                local damage = tonumber(stack.damage or stack.dmg or 0) or 0
-                if name:lower() == targetName:lower() and damage == targetDamage then
-                    local toTake = math.min(qty, amount - extracted)
-                    if toTake > 0 and type(pim.pushItem) == "function" then
-                        local ok, moved = pcall(pim.pushItem, pim, "down", slot, toTake)
-                        if ok and tonumber(moved) and tonumber(moved) > 0 then
-                            extracted = extracted + tonumber(moved)
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return extracted
+-- =====================================================================
+-- ТРАНЗАКЦИИ (ПОКУПКА / ПРОДАЖА)
+-- =====================================================================
+local function addTransaction(type, playerName, item, qty, coin, ema)
+  local player = players[playerName]
+  if player then
+    player.transactions = (player.transactions or 0) + 1
+    savePlayers()
+  end
 end
 
-local function getMEQuantity(internalName, damage)
-    local me = getMeAddr()
-    if not me then return 0 end
-    local ok, items = pcall(component.invoke, me, "getItemsInNetwork")
-    if not ok or type(items) ~= "table" then return 0 end
-    damage = tonumber(damage) or 0
-    local total = 0
-    for _, item in ipairs(items) do
-        if item.name == internalName and (tonumber(item.damage) or 0) == damage then
-            total = total + (tonumber(item.size) or 0)
-        end
-    end
-    return total
-end
-
--- Загрузка каталога
-local function loadCatalog(mode, callback)
-    local action = "get_catalog"
-    local payload = { catalog = mode }
-    sendRequest(action, payload, function(response)
-        if response.status == "ok" then
-            local data = response.data
-            if mode == "buy" then
-                buyCatalog = data.catalog or {}
-                buyVersion = data.version or 0
-                if catalogMode == "buy" then
-                    allItems = buyCatalog
-                    filterItems()
-                    if currentScreen == "shop" then redrawAll() end
-                end
-            else
-                sellCatalog = data.sellItems or {}
-                sellVersion = data.version or 0
-                if catalogMode == "sell" then
-                    allItems = sellCatalog
-                    filterItems()
-                    if currentScreen == "shop" then redrawAll() end
-                end
-            end
-            if callback then callback(true) end
-        else
-            if callback then callback(false, response.message) end
-        end
+local function performBuy(item, qty)
+  if not item or qty <= 0 then
+    return false, "Неверный товар или количество"
+  end
+  local totalCoin = (item.priceCoin or 0) * qty
+  local totalEma = (item.priceEma or 0) * qty
+  if coinBalance < totalCoin or emaBalance < totalEma then
+    return false, "Недостаточно средств"
+  end
+  local actualQty = getActualItemQuantity(item.internalName, item.damage or 0)
+  if actualQty < qty then
+    return false, "Недостаточно товара в ME"
+  end
+  local me = component.me_interface
+  local id = item.internalName
+  if not id:find(":") then
+    id = "minecraft:" .. id
+  end
+  local fingerprint = { id = id, dmg = item.damage or 0 }
+  local extracted = 0
+  local remaining = qty
+  local maxStack = 64
+  while remaining > 0 do
+    local toTake = math.min(remaining, maxStack)
+    local success, result = pcall(function()
+      return me.exportItem(fingerprint, "up", toTake)
     end)
-end
-
-local function openSession(playerName)
-    local payload = { name = playerName }
-    local response = sendRequestSync("session_open", payload, 5)
-    if response.status == "ok" then
-        local data = response.data
-        local user = data.user or {}
-        currentPlayer = user.name or playerName
-        coinBalance = user.balanceCoin or 0
-        emaBalance = user.balanceEma or 0
-        playerTransactions = user.transactions or 0
-        playerRegDate = user.regDate or ""
-        playerAgreed = user.agreed or false
-        playerBanned = user.banned or false
-        banReason = user.banReason or ""
-        shopPaused = data.maintenance or false
-        return true
+    local got = 0
+    if success then
+      if type(result) == "number" then got = result
+      elseif type(result) == "boolean" and result == true then got = toTake
+      elseif type(result) == "table" then got = result.count or result.amount or result.size or 0
+      end
+    end
+    if got > 0 then
+      extracted = extracted + got
+      remaining = remaining - got
     else
-        return false, response.message
+      break
     end
-end
-
--- Покупка/продажа
-local function performPurchase(item, qty)
-    if not currentPlayer or qty <= 0 then return false, "Некорректные данные" end
-    if playerBanned then return false, "Вы забанены" end
-    if shopPaused then return false, "Магазин на паузе" end
-
-    local stock = getMEQuantity(item.internalName, item.damage)
-    if stock < qty then return false, "Недостаточно товара на складе (в ME)" end
-
-    local txid = "BUY-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
-    local payload = {
-        name = currentPlayer,
-        transactionId = txid,
-        item = item.internalName,
-        damage = tonumber(item.damage) or 0,
-        qty = qty
-    }
-    local response = sendRequestSync("purchase", payload, 5)
-    if response.status ~= "ok" then
-        return false, response.message or "Ошибка покупки"
-    end
-
-    local data = response.data
-    local meAddr = getMeAddr()
-    if not meAddr then
-        sendRequestSync("adjust_purchase", { transactionId = txid, deliveredQty = 0 }, 3)
-        return false, "ME-интерфейс не найден"
-    end
-
-    local id = item.internalName
-    if not id:find(":") then id = "minecraft:" .. id end
-    local fingerprint = { id = id, dmg = tonumber(item.damage) or 0 }
-    local maxStack = 64
-    local ok, detail = pcall(component.invoke, meAddr, "getItemDetail", item.internalName, item.damage)
-    if ok and detail and detail.maxSize then maxStack = detail.maxSize end
-
-    local remaining = qty
-    local delivered = 0
-    while remaining > 0 do
-        local toTake = math.min(remaining, maxStack)
-        local success, result = pcall(component.invoke, meAddr, "exportItem", fingerprint, "up", toTake)
-        local got = 0
-        if success then
-            if type(result) == "number" then got = result
-            elseif type(result) == "boolean" and result == true then got = toTake
-            elseif type(result) == "table" then
-                got = tonumber(result.size or result.count or result.amount) or 0
-            end
-        end
-        if got > 0 then
-            delivered = delivered + got
-            remaining = remaining - got
-        else
-            break
-        end
-    end
-
-    if delivered < qty then
-        local adjResponse = sendRequestSync("adjust_purchase", { transactionId = txid, deliveredQty = delivered }, 3)
-        if adjResponse.status == "ok" then
-            coinBalance = adjResponse.data.balanceCoin or coinBalance
-            emaBalance = adjResponse.data.balanceEma or emaBalance
-            playerTransactions = adjResponse.data.transactions or playerTransactions
-            return true, "Выдано частично: " .. delivered .. " из " .. qty
-        else
-            return false, "Ошибка корректировки: " .. (adjResponse.message or "неизвестно")
-        end
-    else
-        coinBalance = data.balanceCoin or coinBalance
-        emaBalance = data.balanceEma or emaBalance
-        playerTransactions = data.transactions or playerTransactions
-        sendRequest("finalize_purchase", { transactionId = txid }, function() end)
-        return true, "Успешно"
-    end
+  end
+  if extracted == 0 then
+    return false, "Не удалось выдать предметы (возможно, инвентарь полон)"
+  end
+  local actuallySpentCoin = extracted * (item.priceCoin or 0)
+  local actuallySpentEma = extracted * (item.priceEma or 0)
+  coinBalance = coinBalance - actuallySpentCoin
+  emaBalance = emaBalance - actuallySpentEma
+  local player = players[currentPlayer]
+  if player then
+    player.balance = coinBalance
+    player.emaBalance = emaBalance
+    savePlayers()
+  end
+  addTransaction("buy", currentPlayer, item.displayName, extracted, actuallySpentCoin, actuallySpentEma)
+  if extracted < qty then
+    return true, "Выдано " .. extracted .. " из " .. qty .. " (не хватило места)"
+  end
+  return true, "Успешно куплено " .. extracted .. " шт."
 end
 
 local function performSell(item, qty)
-    if not currentPlayer or qty <= 0 then return false, "Некорректные данные" end
-    if playerBanned then return false, "Вы забанены" end
-    if shopPaused then return false, "Магазин на паузе" end
-
-    local inventoryQty = scanPlayerInventory(item.internalName, item.damage)
-    if inventoryQty < qty then return false, "Недостаточно предметов в инвентаре" end
-
-    local extracted = extractToME(item.internalName, qty, item.damage)
-    if extracted == 0 then return false, "Не удалось изъять предметы" end
-
-    local txid = "SELL-" .. tostring(os.time()) .. tostring(math.random(1000,9999))
-    local payload = {
-        name = currentPlayer,
-        transactionId = txid,
-        item = item.internalName,
-        damage = tonumber(item.damage) or 0,
-        qty = extracted
-    }
-    local response = sendRequestSync("sell", payload, 5)
-    if response.status == "ok" then
-        local data = response.data
-        coinBalance = data.balanceCoin or coinBalance
-        emaBalance = data.balanceEma or emaBalance
-        playerTransactions = data.transactions or playerTransactions
-        return true, "Успешно"
-    else
-        return false, response.message or "Ошибка продажи"
-    end
+  if not item or qty <= 0 then
+    return false, "Неверный товар или количество"
+  end
+  local available = scanPlayerInventory(item.internalName, item.damage or 0)
+  if available < qty then
+    return false, "В инвентаре только " .. available .. " шт."
+  end
+  local extracted = extractToME(item.internalName, qty, item.damage or 0)
+  if extracted == 0 then
+    return false, "Не удалось изъять предметы"
+  end
+  local valueCoin = extracted * (item.priceCoin or 0)
+  local valueEma = extracted * (item.priceEma or 0)
+  coinBalance = coinBalance + valueCoin
+  emaBalance = emaBalance + valueEma
+  local player = players[currentPlayer]
+  if player then
+    player.balance = coinBalance
+    player.emaBalance = emaBalance
+    savePlayers()
+  end
+  addTransaction("sell", currentPlayer, item.displayName, extracted, valueCoin, valueEma)
+  return true, "Продано " .. extracted .. " шт., получено " .. string.format("%.2f", valueCoin) .. " Coina, " .. string.format("%.2f", valueEma) .. " EMA"
 end
 
--- UI
+-- =====================================================================
+-- ФИЛЬТРАЦИЯ И ПОИСК (НОВЫЙ ИНТЕРФЕЙС)
+-- =====================================================================
 local function filterItems()
-    items = {}
-    if searchQuery == "" then
-        for i, v in ipairs(allItems) do items[i] = v end
-    else
-        local q = lowerText(searchQuery)
-        for _, v in ipairs(allItems) do
-            if lowerText(v.displayName or v.name or ""):find(q, 1, true) then
-                items[#items + 1] = v
-            end
-        end
+  local source = (shopMode == "buy") and allBuyItems or allSellItems
+  if searchQuery == "" then
+    displayedItems = {}
+    for i, v in ipairs(source) do displayedItems[i] = v end
+  else
+    local q = toLowerCase(searchQuery)
+    displayedItems = {}
+    for _, v in ipairs(source) do
+      if toLowerCase(v.displayName or ""):find(q, 1, true) then
+        table.insert(displayedItems, v)
+      end
     end
-    selectedIndex = 1
-    scrollOffset = 0
+  end
+  table.sort(displayedItems, function(a, b)
+    return sortableName(a.displayName) < sortableName(b.displayName)
+  end)
+  selectedIndex = 1
+  scrollOffset = 0
 end
 
-local function drawBackground()
-    fill(1, 1, WIDTH, HEIGHT, C.bg)
+-- =====================================================================
+-- НОВЫЙ UI (ИЗ admin_shop) – ОСНОВНОЙ ИНТЕРФЕЙС
+-- =====================================================================
+function drawBackground()
+  fill(1, 1, WIDTH, HEIGHT, C.bg)
 end
 
-local function drawTopBar()
-    fill(1, 1, WIDTH, 3, 0x0A0A0A)
-    local title = "VIP-SHOP"
-    text(math.floor((WIDTH - #title) / 2) + 1, 1, title, C.vipTitle, 0x0A0A0A)
-    setFG(C.underLine)
-    setBG(0x0A0A0A)
-    gpu.set(1, 2, string.rep("=", WIDTH))
-    local searchW = 40
-    local searchX = 2
-    local searchY = 3
-    setFG(C.frame)
-    setBG(C.bg)
-    gpu.set(searchX - 1, searchY, "[" .. string.rep(" ", searchW) .. "]")
-    fill(searchX, searchY, searchW, 1, C.inputBg)
-    if searchQuery == "" and not searchFocused then
-        text(searchX + 1, searchY, "Поиск...", C.darkGray, C.inputBg)
-    else
-        text(searchX + 1, searchY, searchQuery, C.inputFg, C.inputBg)
+function drawTopBar()
+  fill(1, 1, WIDTH, 3, 0x0A0A0A)
+  local title = "PIM MARKET"
+  text(math.floor((WIDTH - #title) / 2) + 1, 1, title, C.vipTitle, 0x0A0A0A)
+  setFG(C.underLine)
+  setBG(0x0A0A0A)
+  gpu.set(1, 2, string.rep("=", WIDTH))
+  local modeText = (shopMode == "buy") and "ПОКУПКА" or "ПРОДАЖА"
+  setFG(C.accent_secondary)
+  setBG(0x0A0A0A)
+  gpu.set(WIDTH - #modeText - 2, 1, "[" .. modeText .. "]")
+  local searchW = 35
+  local searchX = 2
+  local searchY = 3
+  setFG(C.frame)
+  setBG(C.bg)
+  gpu.set(searchX - 1, searchY, "[" .. string.rep(" ", searchW) .. "]")
+  fill(searchX, searchY, searchW, 1, C.inputBg)
+  if searchQuery == "" and not searchFocused then
+    text(searchX + 1, searchY, "Поиск...", C.darkGray, C.inputBg)
+  else
+    text(searchX + 1, searchY, searchQuery, C.inputFg, C.inputBg)
+  end
+  local clearX = searchX + searchW + 2
+  setBG(C.buttonClear)
+  setFG(C.white)
+  gpu.fill(clearX, searchY, 11, 1, " ")
+  gpu.set(clearX + 1, searchY, "[ Стереть ]")
+end
+
+function drawMainFrames()
+  setBG(C.bg)
+  setFG(C.mainLine)
+  gpu.set(1, MAIN_Y, "+" .. string.rep("=", WIDTH - 2) .. "+")
+  for y = MAIN_Y + 1, MAIN_Y + MAIN_H - 2 do
+    gpu.set(1, y, "|")
+    gpu.set(WIDTH, y, "|")
+  end
+  gpu.set(1, MAIN_Y + MAIN_H - 1, "+" .. string.rep("=", WIDTH - 2) .. "+")
+end
+
+function drawLeftHeader()
+  sectionHeader(2, MAIN_Y + 1, LEFT_W - 3, "КАТАЛОГ ТОВАРОВ", C.mainLine, C.white)
+  local colY = MAIN_Y + 2
+  fill(2, colY, LEFT_W - 3, 1, C.headerBg)
+  text(COL_NAME_X, colY, "ТОВАР", C.white, C.headerBg)
+  text(COL_ME_X, colY, "В ME", C.white, C.headerBg)
+  text(COL_COINA_X, colY, "Coina", C.white, C.headerBg)
+  text(COL_EMA_X, colY, "EMA", C.white, C.headerBg)
+end
+
+function drawSeparator()
+  setBG(C.bg)
+  setFG(C.mainLine)
+  for y = MAIN_Y + 1, MAIN_Y + MAIN_H - 2 do
+    gpu.set(SEPARATOR1, y, "|")
+    gpu.set(SEPARATOR2, y, "|")
+  end
+  gpu.set(SEPARATOR1, MAIN_Y, "+")
+  gpu.set(SEPARATOR2, MAIN_Y, "+")
+  gpu.set(SEPARATOR1, MAIN_Y + MAIN_H - 1, "+")
+  gpu.set(SEPARATOR2, MAIN_Y + MAIN_H - 1, "+")
+end
+
+function drawScrollbar()
+  setBG(C.bg)
+  setFG(C.darkGray)
+  for y = LIST_Y, LIST_Y + LIST_H - 1 do
+    gpu.set(SCROLL_X, y, " ")
+  end
+  local total = #displayedItems
+  if total <= LIST_H then return end
+  local thumbH = math.max(3, math.floor(LIST_H * 0.25))
+  local maxScroll = total - LIST_H
+  local thumbY = LIST_Y + math.floor((scrollOffset / maxScroll) * (LIST_H - thumbH))
+  setBG(C.accent)
+  for i = 0, thumbH - 1 do
+    local yy = thumbY + i
+    if yy >= LIST_Y and yy <= LIST_Y + LIST_H - 1 then
+      gpu.set(SCROLL_X, yy, " ")
     end
-    local clearX = searchX + searchW + 2
-    setBG(C.buttonClear)
-    setFG(C.white)
-    gpu.fill(clearX, searchY, 11, 1, " ")
-    gpu.set(clearX + 1, searchY, "[ Стереть ]")
+  end
+  setBG(C.bg)
 end
 
-local function drawMainFrames()
-    setBG(C.bg)
-    setFG(C.mainLine)
-    gpu.set(1, MAIN_Y, "+" .. string.rep("=", WIDTH - 2) .. "+")
-    for y = MAIN_Y + 1, MAIN_Y + MAIN_H - 2 do
-        gpu.set(1, y, "|")
-        gpu.set(WIDTH, y, "|")
-    end
-    gpu.set(1, MAIN_Y + MAIN_H - 1, "+" .. string.rep("=", WIDTH - 2) .. "+")
+function drawItemRow(index, y)
+  local item = displayedItems[index]
+  if not item then return end
+  local isSelected = (index == selectedIndex)
+  if isSelected then
+    fill(LIST_X, y, LIST_W, 1, C.selectedBg)
+  else
+    fill(LIST_X, y, LIST_W, 1, C.bg)
+  end
+  local nameColor = isSelected and C.selectedName or C.white
+  local meColor = (shopMode == "buy" and item.qty and item.qty > 0) and C.green or C.red
+  local coinaColor = C.yellow
+  local emaColor = C.cyan
+  if isSelected then
+    text(COL_NAME_X, y, "> ", C.selectedName, C.selectedBg)
+  else
+    text(COL_NAME_X, y, "  ", C.darkGray, C.bg)
+  end
+  local maxNameLen = COL_ME_X - COL_NAME_X - 2
+  local displayName = truncate(item.displayName or "Неизвестно", maxNameLen - 2)
+  text(COL_NAME_X + 2, y, displayName, nameColor, isSelected and C.selectedBg or C.bg)
+  local qtyDisplay = (shopMode == "buy") and tostring(item.qty or 0) or "—"
+  text(COL_ME_X, y, qtyDisplay, meColor, isSelected and C.selectedBg or C.bg)
+  local coinStr = string.format("%.2f", item.priceCoin or 0)
+  text(COL_COINA_X, y, coinStr, coinaColor, isSelected and C.selectedBg or C.bg)
+  local emaStr = string.format("%.2f", item.priceEma or 0)
+  text(COL_EMA_X, y, emaStr, emaColor, isSelected and C.selectedBg or C.bg)
 end
 
-local function drawLeftHeader()
-    sectionHeader(2, MAIN_Y + 1, LEFT_W - 3, "КАТАЛОГ ТОВАРОВ", C.mainLine, C.white)
-    local colY = MAIN_Y + 2
-    fill(2, colY, LEFT_W - 3, 1, C.headerBg)
-    text(COL_NAME_X, colY, "ТОВАР", C.white, C.headerBg)
-    text(COL_ME_X, colY, "В ME", C.white, C.headerBg)
-    text(COL_COINA_X, colY, "COINA", C.white, C.headerBg)
-    text(COL_EMA_X, colY, "EMA", C.white, C.headerBg)
+function drawProductList()
+  fill(LIST_X, LIST_Y, LIST_W, LIST_H, C.bg)
+  if #displayedItems == 0 then
+    local msg = "ПО ТВОЕМУ ЗАПРОСУ, НИЧЕГО НЕ НАЙДЕНО!"
+    local visualLen = 35
+    local mx = LIST_X + math.floor((LIST_W - visualLen) / 2)
+    local my = LIST_Y + math.floor(LIST_H / 2)
+    text(mx, my, msg, C.notFound, C.bg)
+    return
+  end
+  local startIdx = scrollOffset + 1
+  local endIdx = math.min(#displayedItems, startIdx + LIST_H - 1)
+  for i = startIdx, endIdx do
+    drawItemRow(i, LIST_Y + (i - startIdx))
+  end
 end
 
-local function drawSeparator()
-    setBG(C.bg)
-    setFG(C.mainLine)
-    for y = MAIN_Y + 1, MAIN_Y + MAIN_H - 2 do
-        gpu.set(SEPARATOR1, y, "|")
-        gpu.set(SEPARATOR2, y, "|")
-    end
-    gpu.set(SEPARATOR1, MAIN_Y, "+")
-    gpu.set(SEPARATOR2, MAIN_Y, "+")
-    gpu.set(SEPARATOR1, MAIN_Y + MAIN_H - 1, "+")
-    gpu.set(SEPARATOR2, MAIN_Y + MAIN_H - 1, "+")
+function drawInfoBlock()
+  fill(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, 7, C.bg)
+  sectionHeader(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, "ИНФО", C.sectionLine, C.white)
+  local item = displayedItems[selectedIndex]
+  if not item then return end
+  local maxLen = RIGHT_INNER_W - 8
+  local y = INFO_Y + 2
+  text(RIGHT_INNER_X, y, "Товар: " .. truncate(item.displayName or "Неизвестно", maxLen), C.white, C.bg)
+  y = y + 1
+  if shopMode == "buy" then
+    text(RIGHT_INNER_X, y, "В ME : " .. tostring(item.qty or 0), C.green, C.bg)
+  else
+    local invQty = scanPlayerInventory(item.internalName, item.damage or 0)
+    text(RIGHT_INNER_X, y, "В инв.: " .. tostring(invQty), C.green, C.bg)
+  end
+  y = y + 1
+  text(RIGHT_INNER_X, y, "Coina: " .. string.format("%.2f", item.priceCoin or 0), C.yellow, C.bg)
+  y = y + 1
+  text(RIGHT_INNER_X, y, "EMA  : " .. string.format("%.2f", item.priceEma or 0), C.cyan, C.bg)
 end
 
-local function drawScrollbar()
-    setBG(C.bg)
-    setFG(C.darkGray)
-    for y = LIST_Y, LIST_Y + LIST_H - 1 do
-        gpu.set(SCROLL_X, y, " ")
-    end
-    local maxScroll = math.max(0, #items - LIST_H)
-    local thumbH = math.max(3, math.floor(LIST_H * 0.25))
-    local thumbY = LIST_Y
-    if maxScroll > 0 then
-        thumbY = LIST_Y + math.floor((scrollOffset / maxScroll) * (LIST_H - thumbH))
-    end
-    setBG(C.accent)
-    for i = 0, thumbH - 1 do
-        local yy = thumbY + i
-        if yy >= LIST_Y and yy <= LIST_Y + LIST_H - 1 then
-            gpu.set(SCROLL_X, yy, " ")
-        end
-    end
-    setBG(C.bg)
+function drawQuantitySection()
+  fill(RIGHT_INNER_X, QTY_Y, RIGHT_INNER_W, 9, C.bg)
+  sectionHeader(RIGHT_INNER_X, QTY_Y, RIGHT_INNER_W, "Количество", C.sectionLine, C.white)
+  local fieldY = QTY_Y + 2
+  setFG(C.frame)
+  setBG(C.bg)
+  gpu.set(RIGHT_INNER_X, fieldY, "[" .. string.rep(" ", RIGHT_INNER_W - 2) .. "]")
+  fill(RIGHT_INNER_X + 1, fieldY, RIGHT_INNER_W - 2, 1, C.inputBg)
+  if quantity == "" then
+    text(RIGHT_INNER_X + 2, fieldY, "Введите количество...", C.darkGray, C.inputBg)
+  else
+    text(RIGHT_INNER_X + 2, fieldY, quantity, C.inputFg, C.inputBg)
+  end
+  local item = displayedItems[selectedIndex]
+  local qty = tonumber(quantity) or 0
+  local totalCoina = 0
+  local totalEma = 0
+  if item then
+    totalCoina = qty * (item.priceCoin or 0)
+    totalEma = qty * (item.priceEma or 0)
+  end
+  local totalStr = string.format("Итог: Coina: %.2f | EMA: %.2f", totalCoina, totalEma)
+  text(RIGHT_INNER_X, TOTAL_Y, totalStr, C.yellow, C.bg)
+  local btnW = 12
+  local gap = 2
+  local actionText = (shopMode == "buy") and "[ Купить ]" or "[ Продать ]"
+  setBG(C.buttonBuy)
+  setFG(C.white)
+  gpu.fill(RIGHT_INNER_X, BTN_Y, btnW, 1, " ")
+  gpu.set(RIGHT_INNER_X + 1, BTN_Y, actionText)
+  setBG(C.buttonClear)
+  setFG(C.white)
+  gpu.fill(RIGHT_INNER_X + btnW + gap, BTN_Y, btnW, 1, " ")
+  gpu.set(RIGHT_INNER_X + btnW + gap + 1, BTN_Y, "[ Стереть ]")
 end
 
-local function drawItemRow(index, y)
-    local item = items[index]
-    if not item then return end
-    local isSelected = (index == selectedIndex)
-    if isSelected then
-        fill(LIST_X, y, LIST_W, 1, C.selectedBg)
-    else
-        fill(LIST_X, y, LIST_W, 1, C.bg)
-    end
-    local nameColor = isSelected and C.selectedName or C.white
-    local meColor = item.star and C.green or C.red
-    local coinaColor = C.yellow
-    local emaColor = C.cyan
-    if isSelected then
-        text(COL_NAME_X, y, "> ", C.selectedName, C.selectedBg)
-    else
-        if item.star then
-            text(COL_NAME_X, y, "* ", C.star, C.bg)
-        else
-            text(COL_NAME_X, y, "- ", C.darkGray, C.bg)
-        end
-    end
-    local maxNameLen = COL_ME_X - COL_NAME_X - 2
-    local displayName = truncate(item.displayName or item.name or "", maxNameLen - 2)
-    text(COL_NAME_X + 2, y, displayName, nameColor, isSelected and C.selectedBg or C.bg)
-    local meQty = getMEQuantity(item.internalName, item.damage)
-    text(COL_ME_X, y, tostring(meQty), meColor, isSelected and C.selectedBg or C.bg)
-    text(COL_COINA_X, y, trimNumber(item.priceCoin or 0, 2), coinaColor, isSelected and C.selectedBg or C.bg)
-    text(COL_EMA_X, y, trimNumber(item.priceEma or 0, 2), emaColor, isSelected and C.selectedBg or C.bg)
+function drawAccountInfo()
+  fill(RIGHT_INNER_X, ACC_Y, RIGHT_INNER_W, 8, C.bg)
+  sectionHeader(RIGHT_INNER_X, ACC_Y, RIGHT_INNER_W, "Информация Аккаунта", C.sectionLine, C.white)
+  local y = ACC_Y + 2
+  text(RIGHT_INNER_X, y, "НИК      : " .. account.nick, C.white, C.bg)
+  y = y + 1
+  text(RIGHT_INNER_X, y, "Баланс   : " .. account.coina .. " Coina | " .. account.ema .. " EMA", C.yellow, C.bg)
+  y = y + 1
+  text(RIGHT_INNER_X, y, "Регистрация: " .. account.regDate, C.gray, C.bg)
+  y = y + 1
+  text(RIGHT_INNER_X, y, "Транзакции: " .. account.trans, C.cyan, C.bg)
 end
 
-local function drawProductList()
-    fill(LIST_X, LIST_Y, LIST_W, LIST_H, C.bg)
-    if #items == 0 then
-        local msg = "ПО ТВОЕМУ ЗАПРОСУ, НИЧЕГО НЕ НАЙДЕНО!"
-        local visualLen = 35
-        local mx = LIST_X + math.floor((LIST_W - visualLen) / 2)
-        local my = LIST_Y + math.floor(LIST_H / 2)
-        text(mx, my, msg, C.notFound, C.bg)
-        return
-    end
-    local startIdx = scrollOffset + 1
-    local endIdx = math.min(#items, startIdx + LIST_H - 1)
-    for i = startIdx, endIdx do
-        drawItemRow(i, LIST_Y + (i - startIdx))
-    end
+function drawRightPanel()
+  drawInfoBlock()
+  drawQuantitySection()
+  drawAccountInfo()
 end
 
-local function drawInfoBlock()
-    fill(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, 7, C.bg)
-    sectionHeader(RIGHT_INNER_X, INFO_Y, RIGHT_INNER_W, "ИНФО", C.sectionLine, C.white)
-    local item = items[selectedIndex]
-    if not item then return end
-    local maxLen = RIGHT_INNER_W - 8
-    local y = INFO_Y + 2
-    text(RIGHT_INNER_X, y, "Товар: " .. truncate(item.displayName or item.name or "", maxLen), C.white, C.bg)
-    y = y + 1
-    local meQty = getMEQuantity(item.internalName, item.damage)
-    text(RIGHT_INNER_X, y, "В ME : " .. meQty, C.green, C.bg)
-    y = y + 1
-    text(RIGHT_INNER_X, y, "COINA: " .. trimNumber(item.priceCoin or 0, 2), C.yellow, C.bg)
-    y = y + 1
-    text(RIGHT_INNER_X, y, "EMA  : " .. trimNumber(item.priceEma or 0, 2), C.cyan, C.bg)
+function drawBottomBar()
+  fill(1, BOT_Y, WIDTH, 2, 0x0A0A0A)
+  setFG(C.mainLine)
+  setBG(C.bg)
+  gpu.set(1, BOT_Y - 1, "+" .. string.rep("=", WIDTH - 2) .. "+")
+  local btnW = 14
+  local gap = 2
+  local leftMargin = 2
+  local buyX = leftMargin
+  local salesX = buyX + btnW + gap
+  setBG(C.buttonBuy)
+  setFG(C.white)
+  gpu.fill(buyX, BOT_Y, btnW, 1, " ")
+  gpu.set(buyX + 2, BOT_Y, "[ Покупки ]")
+  setBG(C.buttonSales)
+  setFG(C.white)
+  gpu.fill(salesX, BOT_Y, btnW, 1, " ")
+  gpu.set(salesX + 2, BOT_Y, "[ Продажи ]")
 end
 
-local function drawQuantitySection()
-    fill(RIGHT_INNER_X, QTY_Y, RIGHT_INNER_W, 9, C.bg)
-    sectionHeader(RIGHT_INNER_X, QTY_Y, RIGHT_INNER_W, "Поле для количества", C.sectionLine, C.white)
-    local fieldY = QTY_Y + 2
-    setFG(C.frame)
-    setBG(C.bg)
-    gpu.set(RIGHT_INNER_X, fieldY, "[" .. string.rep(" ", RIGHT_INNER_W - 2) .. "]")
-    fill(RIGHT_INNER_X + 1, fieldY, RIGHT_INNER_W - 2, 1, C.inputBg)
-    if quantity == "" then
-        text(RIGHT_INNER_X + 2, fieldY, "Введите количество...", C.darkGray, C.inputBg)
-    else
-        text(RIGHT_INNER_X + 2, fieldY, quantity, C.inputFg, C.inputBg)
-    end
-    local item = items[selectedIndex]
-    local qty = tonumber(quantity) or 0
-    local totalCoina = 0
-    local totalEma = 0
-    if item then
-        totalCoina = qty * (tonumber(item.priceCoin) or 0)
-        totalEma = qty * (tonumber(item.priceEma) or 0)
-    end
-    text(RIGHT_INNER_X, TOTAL_Y, string.format("Итог: COINA: %s | EMA: %s", trimNumber(totalCoina, 2), trimNumber(totalEma, 2)), C.yellow, C.bg)
-    local btnW = 12
-    local gap = 2
-    setBG(C.buttonBuy)
-    setFG(C.white)
-    gpu.fill(RIGHT_INNER_X, BTN_Y, btnW, 1, " ")
-    gpu.set(RIGHT_INNER_X + 1, BTN_Y, "[ Купить ]")
-    setBG(C.buttonClear)
-    setFG(C.white)
-    gpu.fill(RIGHT_INNER_X + btnW + gap, BTN_Y, btnW, 1, " ")
-    gpu.set(RIGHT_INNER_X + btnW + gap + 1, BTN_Y, "[ Стереть ]")
+function drawBottomBorder()
+  setFG(C.mainLine)
+  setBG(C.bg)
+  gpu.set(1, HEIGHT, "+" .. string.rep("=", WIDTH - 2) .. "+")
 end
 
-local function drawAccountInfo()
-    fill(RIGHT_INNER_X, ACC_Y, RIGHT_INNER_W, 8, C.bg)
-    sectionHeader(RIGHT_INNER_X, ACC_Y, RIGHT_INNER_W, "Информация Аккаунта", C.sectionLine, C.white)
-    local y = ACC_Y + 2
-    text(RIGHT_INNER_X, y, "НИК      : " .. (currentPlayer or "Неизвестно"), C.white, C.bg)
-    y = y + 1
-    text(RIGHT_INNER_X, y, "Баланс   : " .. trimNumber(coinBalance, 2) .. " COINA | " .. trimNumber(emaBalance, 2) .. " EMA", C.yellow, C.bg)
-    y = y + 1
-    text(RIGHT_INNER_X, y, "Регистрация: " .. playerRegDate, C.gray, C.bg)
-    y = y + 1
-    text(RIGHT_INNER_X, y, "Транзакции: " .. playerTransactions, C.cyan, C.bg)
+function redrawAll()
+  drawBackground()
+  drawTopBar()
+  drawMainFrames()
+  drawLeftHeader()
+  drawProductList()
+  drawScrollbar()
+  drawRightPanel()
+  drawBottomBar()
+  drawBottomBorder()
+  drawSeparator()
 end
 
-local function drawRightPanel()
-    drawInfoBlock()
-    drawQuantitySection()
-    drawAccountInfo()
+-- =====================================================================
+-- ОБНОВЛЕНИЕ СОСТОЯНИЯ ПОСЛЕ СМЕНЫ ИГРОКА
+-- =====================================================================
+local function updateAccountDisplay()
+  local player = players[currentPlayer]
+  if player then
+    account.nick = currentPlayer
+    account.coina = string.format("%.2f", player.balance or 0)
+    account.ema = string.format("%.2f", player.emaBalance or 0)
+    account.regDate = player.regDate or "Неизвестно"
+    account.trans = tostring(player.transactions or 0)
+    coinBalance = player.balance or 0
+    emaBalance = player.emaBalance or 0
+    playerTransactions = player.transactions or 0
+    playerRegDate = player.regDate or ""
+    playerAgreed = player.agreed or false
+  else
+    account.nick = "Нет игрока"
+    account.coina = "0.00"
+    account.ema = "0.00"
+    account.regDate = ""
+    account.trans = "0"
+    coinBalance = 0
+    emaBalance = 0
+  end
 end
 
-local function drawBottomBar()
-    fill(1, BOT_Y, WIDTH, 2, 0x0A0A0A)
-    setFG(C.mainLine)
-    setBG(C.bg)
-    gpu.set(1, BOT_Y - 1, "+" .. string.rep("=", WIDTH - 2) .. "+")
-    local btnW = 14
-    local gap = 2
-    local leftMargin = 2
-    local buyX = leftMargin
-    local salesX = buyX + btnW + gap
-    setBG(C.buttonBuy)
-    setFG(C.white)
-    gpu.fill(buyX, BOT_Y, btnW, 1, " ")
-    gpu.set(buyX + 2, BOT_Y, "[ Покупки ]")
-    setBG(C.buttonSales)
-    setFG(C.white)
-    gpu.fill(salesX, BOT_Y, btnW, 1, " ")
-    gpu.set(salesX + 2, BOT_Y, "[ Продажи ]")
-end
-
-local function drawBottomBorder()
-    setFG(C.mainLine)
-    setBG(C.bg)
-    gpu.set(1, HEIGHT, "+" .. string.rep("=", WIDTH - 2) .. "+")
-end
-
-local function redrawAll()
-    drawBackground()
-    drawTopBar()
-    drawMainFrames()
-    drawLeftHeader()
-    drawProductList()
-    drawScrollbar()
-    drawRightPanel()
-    drawBottomBar()
-    drawBottomBorder()
-    drawSeparator()
-end
-
+-- =====================================================================
+-- ОБРАБОТЧИКИ СОБЫТИЙ ДЛЯ НОВОГО ИНТЕРФЕЙСА
+-- =====================================================================
 local function selectItem(index)
-    if #items == 0 then return end
-    if index < 1 then index = 1 end
-    if index > #items then index = #items end
-    selectedIndex = index
-    if selectedIndex - 1 < scrollOffset then
-        scrollOffset = selectedIndex - 1
-    elseif selectedIndex > scrollOffset + LIST_H then
-        scrollOffset = selectedIndex - LIST_H
-    end
-    quantity = ""
-    drawProductList()
-    drawScrollbar()
-    drawRightPanel()
+  if #displayedItems == 0 then return end
+  if index < 1 then index = 1 end
+  if index > #displayedItems then index = #displayedItems end
+  selectedIndex = index
+  if selectedIndex - 1 < scrollOffset then
+    scrollOffset = selectedIndex - 1
+  elseif selectedIndex > scrollOffset + LIST_H then
+    scrollOffset = selectedIndex - LIST_H
+  end
+  quantity = ""
+  redrawAll()
 end
 
 local function scroll(delta)
-    local maxScroll = math.max(0, #items - LIST_H)
-    scrollOffset = math.max(0, math.min(maxScroll, scrollOffset + delta))
-    drawProductList()
-    drawScrollbar()
+  local maxScroll = math.max(0, #displayedItems - LIST_H)
+  scrollOffset = math.max(0, math.min(maxScroll, scrollOffset + delta))
+  redrawAll()
 end
-
--- ============================================================
---  ОБРАБОТЧИКИ
--- ============================================================
 
 local function handleClick(x, y)
-    searchFocused = false
-    qtyFocused = false
-    if x >= LIST_X and x <= LIST_X + LIST_W and y >= LIST_Y and y <= LIST_Y + LIST_H - 1 then
-        local row = y - LIST_Y
-        local index = scrollOffset + row + 1
-        if index >= 1 and index <= #items then
-            selectItem(index)
-        end
-        return
+  searchFocused = false
+  if x >= LIST_X and x <= LIST_X + LIST_W and y >= LIST_Y and y <= LIST_Y + LIST_H - 1 then
+    local row = y - LIST_Y
+    local index = scrollOffset + row + 1
+    if index >= 1 and index <= #displayedItems then
+      selectItem(index)
     end
-    local searchW = 40
-    local clearX = 2 + searchW + 2
-    if y == 3 and x >= clearX and x < clearX + 11 then
-        searchQuery = ""
+    return
+  end
+  local searchW = 35
+  local clearX = 2 + searchW + 2
+  if y == 3 and x >= clearX and x < clearX + 11 then
+    searchQuery = ""
+    filterItems()
+    redrawAll()
+    return
+  end
+  if y == 3 and x >= 2 and x <= 2 + searchW then
+    searchFocused = true
+    return
+  end
+  local fieldY = QTY_Y + 2
+  local btnW = 12
+  local gap = 2
+  local clearQtyX = RIGHT_INNER_X + btnW + gap
+  if y == BTN_Y and x >= clearQtyX and x < clearQtyX + btnW then
+    quantity = ""
+    redrawAll()
+    return
+  end
+  if y == BTN_Y and x >= RIGHT_INNER_X and x < RIGHT_INNER_X + btnW then
+    local item = displayedItems[selectedIndex]
+    if not item then return end
+    local qty = tonumber(quantity)
+    if not qty or qty <= 0 then
+      text(2, HEIGHT, "Введите корректное количество", C.error, C.bg)
+      return
+    end
+    if shopMode == "buy" then
+      local ok, msg = performBuy(item, qty)
+      if ok then
+        loadBuyItems()
         filterItems()
         redrawAll()
-        return
+        text(2, HEIGHT, msg, C.success, C.bg)
+      else
+        text(2, HEIGHT, "Ошибка: " .. msg, C.error, C.bg)
+      end
+    else
+      local ok, msg = performSell(item, qty)
+      if ok then
+        loadBuyItems()
+        filterItems()
+        redrawAll()
+        text(2, HEIGHT, msg, C.success, C.bg)
+      else
+        text(2, HEIGHT, "Ошибка: " .. msg, C.error, C.bg)
+      end
     end
-    if y == 3 and x >= 2 and x <= 2 + searchW then
-        searchFocused = true
-        return
-    end
-    local fieldY = QTY_Y + 2
-    if y == fieldY and x >= RIGHT_INNER_X and x <= RIGHT_INNER_X + RIGHT_INNER_W then
-        qtyFocused = true
-        return
-    end
-    local btnW = 12
-    local gap = 2
-    local clearQtyX = RIGHT_INNER_X + btnW + gap
-    if y == BTN_Y and x >= clearQtyX and x < clearQtyX + btnW then
-        quantity = ""
-        drawQuantitySection()
-        return
-    end
-    -- Кнопка покупки/продажи
-    if y == BTN_Y and x >= RIGHT_INNER_X and x < RIGHT_INNER_X + btnW then
-        local item = items[selectedIndex]
-        if not item then return
-        local qty = tonumber(quantity) or 0
-        if qty <= 0 then
-            text(RIGHT_INNER_X, BTN_Y+2, "Введите количество!", C.red, C.bg)
-            return
-        end
-        local ok, msg
-        if catalogMode == "sell" then
-            ok, msg = performSell(item, qty)
-        else
-            ok, msg = performPurchase(item, qty)
-        end
-        if ok then
-            text(RIGHT_INNER_X, BTN_Y+2, "Операция успешна!", C.green, C.bg)
-            redrawAll()
-        else
-            text(RIGHT_INNER_X, BTN_Y+2, "Ошибка: " .. msg, C.red, C.bg)
-        end
-        return
-    end
-    -- Переключение режимов внизу
-    if y == BOT_Y then
-        if x >= buyX and x < buyX + btnW then
-            catalogMode = "buy"
-            allItems = buyCatalog
-            filterItems()
-            redrawAll()
-        elseif x >= salesX and x < salesX + btnW then
-            catalogMode = "sell"
-            allItems = sellCatalog
-            filterItems()
-            redrawAll()
-        end
-    end
-end
-
--- ============================================================
---  ОСНОВНОЙ ЦИКЛ
--- ============================================================
-
-local currentScreen = "login"
-local loginName = ""
-
-local function drawLoginScreen()
-    clear()
-    setBG(C.bg)
-    setFG(C.white)
-    local title = "VIP-SHOP КЛИЕНТ"
-    local titleX = math.floor((WIDTH - #title) / 2) + 1
-    text(titleX, 8, title, C.vipTitle)
-    text(math.floor((WIDTH - 15) / 2) + 1, 12, "Введите имя игрока:", C.white)
-    setBG(C.inputBg)
-    setFG(C.white)
-    gpu.fill(20, 14, 40, 1, " ")
-    text(21, 14, loginName, C.inputFg, C.inputBg)
-    setFG(C.gray)
-    text(math.floor((WIDTH - 25) / 2) + 1, 18, "Нажмите Enter для входа", C.gray)
-end
-
-local function handleLoginKey(char, code)
-    if code == keyboard.keys.enter then
-        if loginName == "" then return end
-        local ok, err = openSession(loginName)
-        if ok then
-            currentScreen = "shop"
-            loadCatalog("buy", function()
-                loadCatalog("sell", function()
-                    allItems = buyCatalog
-                    catalogMode = "buy"
-                    filterItems()
-                    redrawAll()
-                end)
-            end)
-        else
-            text(20, 20, "Ошибка: " .. (err or "неизвестно"), C.red, C.bg)
-        end
-    elseif code == keyboard.keys.back then
-        loginName = loginName:sub(1, -2)
-        drawLoginScreen()
-    elseif char and char >= 32 then
-        loginName = loginName .. unicode.char(char)
-        drawLoginScreen()
-    end
-end
-
--- ============================================================
---  ЗАПУСК
--- ============================================================
-gpu.setResolution(80, 25)
-gpu.setBackground(C.bg)
-
-if not serverAddress then
-    print("Ошибка: адрес сервера не задан")
     return
-end
-
-currentScreen = "login"
-drawLoginScreen()
-
-while true do
-    local ev = { event.pull(0.5) }
-    local name = ev[1]
-
-    if name == "modem_message" then
-        local _, _, port, protocol, kind, key, requestId, chunkIndex, total, chunk = table.unpack(ev)
-        if port == SERVER_PORT and protocol == PROTOCOL and key == NETWORK_KEY then
-            if kind == "chunk" then
-                processChunk(requestId, chunk, total, chunkIndex)
-            elseif kind == "push" then
-                local action = ev[9]
-                local dataStr = ev[10] or "{}"
-                local ok, data = pcall(serialization.unserialize, dataStr)
-                if ok and type(data) == "table" then
-                    handlePush(action, data)
-                end
-            end
-        end
-    elseif name == "touch" then
-        if currentScreen == "shop" then
-            handleClick(ev[3], ev[4])
-        end
-    elseif name == "scroll" then
-        if currentScreen == "shop" then
-            local x, direction = ev[3], ev[5]
-            if x >= LIST_X and x <= LIST_X + LIST_W + 2 then
-                scroll(-direction)
-            end
-        end
-    elseif name == "key_down" then
-        local char, code = ev[3], ev[4]
-        if currentScreen == "login" then
-            handleLoginKey(char, code)
-        elseif currentScreen == "shop" then
-            if searchFocused then
-                if code == keyboard.keys.enter or code == keyboard.keys.tab then
-                    searchFocused = false
-                elseif code == keyboard.keys.back then
-                    searchQuery = searchQuery:sub(1, -2)
-                    filterItems()
-                    redrawAll()
-                elseif char and char >= 32 then
-                    if #searchQuery < 30 then
-                        searchQuery = searchQuery .. unicode.char(char)
-                        filterItems()
-                        redrawAll()
-                    end
-                end
-            elseif qtyFocused then
-                if code == keyboard.keys.enter or code == keyboard.keys.tab then
-                    qtyFocused = false
-                elseif code == keyboard.keys.back then
-                    quantity = quantity:sub(1, -2)
-                    drawQuantitySection()
-                elseif char and char >= 48 and char <= 57 then
-                    if #quantity < 8 then
-                        quantity = quantity .. string.char(char)
-                        drawQuantitySection()
-                    end
-                end
-            else
-                if code == keyboard.keys.up then
-                    selectItem(selectedIndex - 1)
-                elseif code == keyboard.keys.down then
-                    selectItem(selectedIndex + 1)
-                elseif code == keyboard.keys.back then
-                    quantity = quantity:sub(1, -2)
-                    drawQuantitySection()
-                elseif char and char >= 48 and char <= 57 then
-                    if #quantity < 8 then
-                        quantity = quantity .. string.char(char)
-                        drawQuantitySection()
-                    end
-                elseif code == keyboard.keys.escape then
-                    break
-                end
-            end
-        end
-    elseif name == "interrupted" then
-        term.clear()
-        print("Клиент закрыт")
-        break
+  end
+  local btnWide = 14
+  local buyX = 2
+  local salesX = buyX + btnWide + 2
+  if y == BOT_Y then
+    if x >= buyX and x < buyX + btnWide then
+      shopMode = "buy"
+      loadBuyItems()
+      filterItems()
+      redrawAll()
+      return
+    elseif x >= salesX and x < salesX + btnWide then
+      shopMode = "sell"
+      loadSellItems()
+      filterItems()
+      redrawAll()
+      return
     end
+  end
 end
+
+-- =====================================================================
+-- СТАРЫЕ UI-ФУНКЦИИ ИЗ PIM MARKET (СОХРАНЕНЫ ВМЕСТЕ С ДЕКОРАТИВНЫМИ ЭЛЕМЕНТАМИ)
+-- Все эти функции не используются в основном цикле, но доступны для переключения.
+-- =====================================================================
+
+-- Функция отрисовки экрана приветствия (старая)
+function drawWelcomeScreen()
+  clear()
+  drawScreenBorder()
+  local diamX = 17
+  local diamY = 3
+  for i, line in ipairs(diamond) do
+    local color = gradient[math.min(math.floor((i-1) / 2) + 1, #gradient)]
+    gpu.setForeground(color)
+    gpu.set(diamX, diamY + i - 1, line)
+  end
+  local cx = 41
+  if shopPaused then
+    gpu.setForeground(C.error)
+    drawCenteredText(21, " РЕЖИМ ОБСЛУЖИВАНИЯ", C.error)
+    drawCenteredText(22, " Магазин временно закрыт", C.error)
+    drawCenteredText(23, " Пожалуйста, зайдите позже", C.text_main)
+  else
+    if currentPlayer and currentPlayer ~= "" then
+      gpu.setForeground(C.vipTitle)
+      gpu.set(cx - 2, 21, "VIP SHOP")
+      gpu.setForeground(C.accent_secondary)
+      gpu.set(cx - 6, 22, "◆ McSkill HiTech ◆")
+      gpu.setForeground(C.inactive)
+      gpu.set(cx - 10, 23, "Встаньте на ПИМ для входа")
+    else
+      gpu.setForeground(C.vipTitle)
+      gpu.set(cx - 2, 21, "VIP SHOP")
+      gpu.setForeground(C.accent_secondary)
+      gpu.set(cx - 6, 22, "◆ McSkill HiTech ◆")
+      gpu.setForeground(C.inactive)
+      gpu.set(cx - 10, 23, "Встаньте на ПИМ для входа")
+    end
+  end
+end
+
+-- Функция отрисовки главного меню (старая)
+function drawMainMenu()
+  clear()
+  drawScreenBorder()
+  if currentPlayer then
+    local hello1 = "Добро пожаловать, "
+    local hello2 = currentPlayer .. "!"
+    local full1 = hello1 .. hello2
+    local x1 = math.floor((80 - unicode.len(full1))/2) + 2
+    gpu.setForeground(C.success)
+    gpu.set(x1, 4, hello1)
+    gpu.setForeground(C.text_bright)
+    gpu.set(x1 + unicode.len(hello1), 4, hello2)
+    drawBalanceLine(3, 5)
+    if not playerAgreed then
+      gpu.setForeground(C.accent_secondary)
+      if showShopDenied then
+        drawCenteredText(7, "Доступ запрещён. Примите соглашение [Соглашение]", C.error)
+      else
+        drawCenteredText(7, "Вы не приняли пользовательское соглашение! Нажмите [Соглашение]", C.accent_secondary)
+      end
+    end
+    for _, btn in pairs(menuButtons) do
+      drawButton(btn)
+    end
+    gpu.setForeground(C.error)
+    gpu.set(4, 24, "[ ПОДДЕРЖКА ]")
+    gpu.set(35, 24, "[ СОГЛАШЕНИЕ ]")
+    gpu.set(68, 24, "[ ОТЗЫВЫ ]")
+  else
+    drawWelcomeScreen()
+  end
+  drawTempMessage()
+end
+
+-- Функция отрисовки меню магазина (старая)
+function drawShopMenu()
+  clear()
+  drawScreenBorder()
+  drawCenteredText(6, " МАГАЗИН", C.accent_secondary)
+  if not playerAgreed then
+    drawCenteredText(9, "Доступ запрещён.", C.error)
+    drawCenteredText(10, "Примите соглашение, нажав [Соглашение] в главном меню.", C.accent_main)
+    local backButton = {
+      text = "[ НАЗАД ]",
+      x = 37, y = 24,
+      xs = unicode.len("[ НАЗАД ]") + 2,
+      ys = 1,
+      bg = C.bg_button,
+      fg = C.accent_secondary
+    }
+    drawFlexButton(backButton)
+    drawTempMessage()
+    return
+  end
+  for _, btn in pairs(shopMenuButtons) do
+    drawButton(btn)
+  end
+  local backButton = {
+    text = "[ НАЗАД ]",
+    x = 37, y = 24,
+    xs = unicode.len("[ НАЗАД ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  drawFlexButton(backButton)
+  drawTempMessage()
+end
+
+-- Функция отрисовки экрана аккаунта (старая)
+function drawAccount(data)
+  clear()
+  drawScreenBorder()
+  drawCenteredText(10, (currentPlayer or "Игрок") .. ":", C.text_bright)
+  local coin = (data and data.balance) or coinBalance or 0.0
+  local ema = (data and data.emaBalance) or emaBalance or 0.0
+  local agreed = (data and data.agreed) or playerAgreed or false
+  gpu.setForeground(C.white)
+  local balanceText = "Баланс: " .. string.format("%.2f", coin) .. " Coina ₵"
+  local balanceX = math.floor((80 - unicode.len(balanceText .. " | ЭМЫ: " .. string.format("%.2f", ema) .. " ۞")) / 2) + 1
+  gpu.set(balanceX, 12, "Баланс: ")
+  gpu.setForeground(C.accent_main)
+  gpu.set(balanceX + unicode.len("Баланс: "), 12, string.format("%.2f", coin) .. " Coina ₵")
+  gpu.setForeground(C.white)
+  gpu.set(balanceX + unicode.len("Баланс: ") + unicode.len(string.format("%.2f", coin) .. " Coina ₵"), 12, " | ")
+  gpu.setForeground(C.tomato)
+  gpu.set(balanceX + unicode.len("Баланс: ") + unicode.len(string.format("%.2f", coin) .. " Coina ₵") + unicode.len(" | "), 12, "ЭМЫ: " .. string.format("%.2f", ema) .. " ۞")
+  local transLabel = "Совершенно транзакций: "
+  local transCount = tostring((data and data.transactions) or playerTransactions or 0)
+  local fullTrans = transLabel .. transCount
+  local transX = math.floor((80 - unicode.len(fullTrans)) / 2) + 1
+  gpu.setForeground(C.success)
+  gpu.set(transX, 13, transLabel)
+  gpu.setForeground(C.text_bright)
+  gpu.set(transX + unicode.len(transLabel), 13, transCount)
+  local regLabel = "Регистрация: "
+  local regDate = (data and data.regDate) or playerRegDate or "Неизвестно"
+  local fullReg = regLabel .. regDate
+  local regX = math.floor((80 - unicode.len(fullReg)) / 2) + 1
+  gpu.setForeground(C.success)
+  gpu.set(regX, 14, regLabel)
+  gpu.setForeground(C.text_bright)
+  gpu.set(regX + unicode.len(regLabel), 14, regDate)
+  local agreeLabel = "Соглашение: "
+  local agreeStatus = agreed and "ознакомлен" or "не ознакомлен"
+  local agreeColor = agreed and C.text_bright or C.error
+  local fullAgree = agreeLabel .. agreeStatus
+  local agreeX = math.floor((80 - unicode.len(fullAgree)) / 2) + 1
+  gpu.setForeground(C.success)
+  gpu.set(agreeX, 15, agreeLabel)
+  gpu.setForeground(agreeColor)
+  gpu.set(agreeX + unicode.len(agreeLabel), 15, agreeStatus)
+  local authBtn = {
+    text = "[ АУТЕНТИФИКАЦИЯ ]",
+    x = 20, y = 24,
+    xs = unicode.len("[ АУТЕНТИФИКАЦИЯ ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  local backButton = {
+    text = "[ НАЗАД ]",
+    x = 50, y = 24,
+    xs = unicode.len("[ НАЗАД ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  drawFlexButton(authBtn)
+  drawFlexButton(backButton)
+  drawTempMessage()
+end
+
+-- Функция отрисовки экрана репорта (старая)
+function drawReportScreen()
+  currentScreen = "report"
+  clear()
+  drawScreenBorder()
+  drawCenteredText(4, "РЕПОРТ", C.accent_secondary)
+  gpu.setForeground(C.text_main)
+  local help1 = "Опишите проблему: баг, предложение, жалоба."
+  local helpX = math.floor((80 - unicode.len(help1)) / 2) + 1
+  gpu.set(helpX, 7, help1)
+  gpu.setBackground(C.bg_input)
+  gpu.fill(11, 9, 59, 3, " ")
+  gpu.setForeground(C.text_bright)
+  if reportInput and reportInput ~= "" then
+    gpu.set(12, 10, unicode.sub(reportInput, -58))
+  else
+    gpu.setForeground(C.inactive)
+    gpu.set(12, 10, "Введите текст сообщения...")
+  end
+  gpu.setBackground(C.bg_main)
+  local sendBtn = {x=33, y=14, xs=17, ys=1, text="[ ОТПРАВИТЬ ]", bg=C.bg_button, fg=C.success}
+  local backButton = {
+    text = "[ НАЗАД ]",
+    x = 37, y = 24,
+    xs = unicode.len("[ НАЗАД ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  drawFlexButton(sendBtn)
+  drawFlexButton(backButton)
+  gpu.setForeground(C.text_main)
+  drawCenteredText(16, "Ограничение: 1 репорт в сутки (сброс в 00:00 МСК)", C.error)
+  drawTempMessage()
+end
+
+-- Функция отрисовки списка отзывов (старая)
+function drawFeedbacksList()
+  clear()
+  drawScreenBorder()
+  local line = string.rep("═", 15)
+  local title = " ОТЗЫВЫ "
+  local line2 = string.rep("═", 15)
+  local fullStr = line .. title .. line2
+  local x = math.floor((80 - unicode.len(fullStr)) / 2) + 1
+  gpu.setForeground(C.accent_main)
+  gpu.set(x, 2, line)
+  gpu.setForeground(C.text_bright)
+  gpu.set(x + unicode.len(line), 2, title)
+  gpu.setForeground(C.accent_main)
+  gpu.set(x + unicode.len(line) + unicode.len(title), 2, line2)
+  local feedbacks = {}
+  if fs.exists("/home/feedbacks.db") then
+    local file = io.open("/home/feedbacks.db", "r")
+    if file then
+      local data = file:read("*a")
+      file:close()
+      if data and #data > 0 then
+        local ok, result = pcall(serialization.unserialize, data)
+        if ok and type(result) == "table" then feedbacks = result end
+      end
+    end
+  end
+  if #feedbacks == 0 then
+    drawCenteredText(10, "Пока нет ни одного отзыва.", C.text_main)
+    drawCenteredText(11, "Будьте первым, кто оставит отзыв!", C.accent_main)
+    if not playerHasFeedback then
+      drawCenteredText(12, "Нажмите [ДОБАВИТЬ] чтобы оставить отзыв", C.text_main)
+    end
+  else
+    local startIdx = (feedbacksPage - 1) * 3 + 1
+    local endIdx = math.min(startIdx + 2, #feedbacks)
+    local y = 5
+    for i = startIdx, endIdx do
+      local fb = feedbacks[i]
+      if fb then
+        local rating = fb.rating or 5
+        gpu.setForeground(C.accent_secondary)
+        gpu.fill(5, y, 70, 4, " ")
+        gpu.setBackground(C.bg_secondary)
+        gpu.fill(6, y+1, 68, 2, " ")
+        gpu.setForeground(C.accent_main)
+        gpu.set(7, y+1, fb.name or "Аноним")
+        gpu.setForeground(C.inactive)
+        local timeStr = fb.time or ""
+        local timeX = 7 + unicode.len(fb.name or "Аноним") + 2
+        if timeX + unicode.len(timeStr) < 75 then
+          gpu.set(timeX, y+1, timeStr)
+        end
+        for j = 1, 5 do
+          local starX = 7 + (j-1) * 2
+          if j <= rating then
+            gpu.setForeground(C.gold)
+            gpu.set(starX, y+2, "★")
+          else
+            gpu.setForeground(C.inactive)
+            gpu.set(starX, y+2, "☆")
+          end
+        end
+        gpu.setForeground(C.text_bright)
+        local shortText = unicode.sub(fb.text or "", 1, 60)
+        local textX = 7 + 12
+        if textX + unicode.len(shortText) < 75 then
+          gpu.set(textX, y+2, shortText)
+        else
+          gpu.set(textX, y+2, unicode.sub(shortText, 1, 75 - textX - 3) .. "...")
+        end
+        y = y + 5
+      end
+    end
+    local feedbacksTotalPages = math.max(1, math.ceil(#feedbacks / 3))
+    local pageInfo = "Страница " .. feedbacksPage .. " из " .. feedbacksTotalPages
+    local x2 = math.floor((80 - unicode.len(pageInfo)) / 2) + 1
+    gpu.setForeground(C.text_main)
+    gpu.set(x2, 22, pageInfo)
+  end
+  local backBtn = {x=5, y=24, xs=11, ys=1, text="[ НАЗАД ]", bg=C.bg_button, fg=C.accent_secondary}
+  local addBtn = {x=36, y=24, xs=14, ys=1, text="[ ДОБАВИТЬ ]", bg=C.bg_button, fg=C.success}
+  local prevBtn = {x=59, y=24, xs=7, ys=1, text="[ < ]", bg=C.bg_button, fg=C.accent_main}
+  local nextBtn = {x=69, y=24, xs=7, ys=1, text="[ > ]", bg=C.bg_button, fg=C.accent_main}
+  if not playerHasFeedback then
+    drawFlexButton(addBtn)
+  end
+  drawFlexButton(backBtn)
+  if #feedbacks > 3 then
+    drawFlexButton(prevBtn)
+    drawFlexButton(nextBtn)
+  end
+  drawTempMessage()
+end
+
+-- Функция отрисовки экрана ввода отзыва (старая)
+function drawFeedbackInputScreen()
+  if playerHasFeedback then
+    showTempMessage("Вы уже оставляли отзыв!", 2)
+    return
+  end
+  currentScreen = "feedback_input"
+  clear()
+  drawScreenBorder()
+  drawCenteredText(4, "ОСТАВИТЬ ОТЗЫВ", C.accent_secondary)
+  gpu.setForeground(C.text_main)
+  drawCenteredText(7, "Ваше имя: " .. (currentPlayer or "Игрок"), C.accent_main)
+  drawCenteredText(9, "Оцените магазин:", C.text_main)
+  local starsY = 11
+  local starsX = 30
+  gpu.setForeground(C.accent_secondary)
+  gpu.set(starsX, starsY, "Рейтинг: ")
+  for i = 1, 5 do
+    local starX = starsX + unicode.len("Рейтинг: ") + (i-1)*3
+    if i <= feedbackRating then
+      gpu.setForeground(C.gold)
+      gpu.set(starX, starsY, "★")
+    else
+      gpu.setForeground(C.inactive)
+      gpu.set(starX, starsY, "☆")
+    end
+  end
+  gpu.setForeground(C.inactive)
+  drawCenteredText(13, "Нажмите 1-5 для выбора рейтинга", C.inactive)
+  gpu.setForeground(C.text_main)
+  drawCenteredText(15, "Оставьте свой отзыв о магазине:", C.text_main)
+  gpu.setBackground(C.bg_input)
+  gpu.fill(11, 17, 59, 3, " ")
+  gpu.setForeground(C.text_bright)
+  if feedbackEditMode then
+    if feedbackInput and feedbackInput ~= "" then
+      gpu.set(12, 18, unicode.sub(feedbackInput, -58) .. "_")
+    else
+      gpu.setForeground(C.inactive)
+      gpu.set(12, 18, "Введите ваш отзыв..._")
+    end
+  else
+    if feedbackInput and feedbackInput ~= "" then
+      gpu.set(12, 18, unicode.sub(feedbackInput, -58))
+    else
+      gpu.setForeground(C.inactive)
+      gpu.set(12, 18, "Введите ваш отзыв...")
+    end
+  end
+  gpu.setBackground(C.bg_main)
+  local cancelBtn = {x=20, y=24, xs=12, ys=1, text="[ ОТМЕНА ]", bg=C.bg_button, fg=C.error}
+  local sendBtn = {x=46, y=24, xs=15, ys=1, text="[ ОТПРАВИТЬ ]", bg=C.bg_button, fg=C.success}
+  drawFlexButton(cancelBtn)
+  drawFlexButton(sendBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки экрана сканирования продажи (старая)
+function drawSellScanScreen()
+  if not sellConfirmItem then return end
+  currentScreen = "sell_scan"
+  clear()
+  drawScreenBorder()
+  drawBalanceLine(3, 1)
+  gpu.setForeground(C.success)
+  gpu.set(3, 3, "Имя предмета: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(18, 3, sellConfirmItem.displayName or "Неизвестно")
+  gpu.setForeground(C.success)
+  gpu.set(55, 3, "Цена: ")
+  if sellConfirmItem.internalName == "customnpcs:npcMoney" then
+    gpu.setForeground(C.tomato)
+    gpu.set(62, 3, string.format("%.2f", sellConfirmItem.price or 0) .. " ۞")
+  else
+    gpu.setForeground(C.accent_main)
+    gpu.set(62, 3, string.format("%.2f", sellConfirmItem.price or 0) .. " ₵")
+  end
+  gpu.setForeground(C.success)
+  gpu.set(3, 5, "Можно продать: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(18, 5, tostring(sellConfirmItem.qty or 0))
+  gpu.setForeground(C.accent_secondary)
+  local scanText = "Сканировать на наличие предмета:"
+  local scanX = math.floor((80 - unicode.len(scanText)) / 2)
+  gpu.set(scanX, 11, scanText)
+  local allBtn = {x=30, y=13, xs=20, ys=1, text="Весь инвентарь", bg=C.bg_button, fg=C.success}
+  drawFlexButton(allBtn)
+  local backButton = {
+    text = "[ НАЗАД ]",
+    x = 37, y = 24,
+    xs = unicode.len("[ НАЗАД ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  drawFlexButton(backButton)
+  if showSellPopup and sellConfirmItem then
+    drawSellPopup()
+  end
+  drawTempMessage()
+end
+
+-- Функция отрисовки попапа продажи (старая)
+function drawSellPopup()
+  if not sellConfirmItem then return end
+  local popupWidth = 40
+  local popupHeight = 10
+  local popupX = math.floor((80 - popupWidth) / 2)
+  local popupY = 10
+  gpu.setBackground(C.black_fon)
+  gpu.fill(popupX, popupY+2, popupWidth, popupHeight-4, " ")
+  gpu.fill(popupX+1, popupY+1, popupWidth-2, popupHeight-2, " ")
+  drawPopupBorder(popupX, popupY, popupWidth, popupHeight, C.accent_secondary)
+  local name = sellConfirmItem.displayName or "Неизвестно"
+  local totalFound = foundAmount or 0
+  local value = totalFound * (sellConfirmItem.price or 0)
+  gpu.setForeground(C.text_bright)
+  gpu.set(popupX+14, popupY, "Подтверждение")
+  gpu.setForeground(C.success)
+  gpu.set(popupX+3, popupY+3, "Магазин заберёт: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(popupX+3 + unicode.len("Магазин заберёт: "), popupY+3, tostring(totalFound))
+  gpu.setForeground(C.success)
+  gpu.set(popupX+3, popupY+4, name .. " x")
+  gpu.setForeground(C.text_bright)
+  gpu.set(popupX+3 + unicode.len(name .. " x"), popupY+4, tostring(totalFound))
+  gpu.setForeground(C.success)
+  gpu.set(popupX+3, popupY+5, "Вы получите: ")
+  if sellConfirmItem.internalName == "customnpcs:npcMoney" then
+    gpu.setForeground(C.tomato)
+    gpu.set(popupX+3 + unicode.len("Вы получите: "), popupY+5, string.format("%.2f", value) .. " ۞")
+  else
+    gpu.setForeground(C.accent_main)
+    gpu.set(popupX+3 + unicode.len("Вы получите: "), popupY+5, string.format("%.2f", value) .. " ₵")
+  end
+  local yesBtn = {x=popupX+5, y=popupY+7, xs=13, ys=1, text="[ Принять ]", bg=C.bg_button, fg=C.success}
+  local noBtn  = {x=popupX+popupWidth-16, y=popupY+7, xs=12, ys=1, text="[ Отмена ]", bg=C.bg_button, fg=C.error}
+  drawFlexButton(yesBtn)
+  drawFlexButton(noBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки экрана покупки (старая)
+function drawPurchaseScreen()
+  currentScreen = "purchase"
+  clear()
+  drawScreenBorder()
+  drawBalanceLine(3, 1)
+  if not purchaseItem then
+    drawCenteredText(10, "Ошибка: предмет не выбран", C.error)
+    local backBtn = {x=37, y=24, xs=unicode.len("[ НАЗАД ]")+2, ys=1, text="[ НАЗАД ]", bg=C.bg_button, fg=C.accent_secondary}
+    drawFlexButton(backBtn)
+    drawTempMessage()
+    return
+  end
+  gpu.setForeground(C.success)
+  gpu.set(3, 3, "Имя предмета: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(18, 3, purchaseItem.displayName or "Неизвестно")
+  gpu.setForeground(C.success)
+  gpu.set(55, 3, "Доступно: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(66, 3, tostring(purchaseItem.qty or 0))
+  local qty = purchaseQuantity or 1
+  local totalCoin = (purchaseItem.priceCoin or 0) * qty
+  local totalEma = (purchaseItem.priceEma or 0) * qty
+  gpu.setForeground(C.success)
+  gpu.set(3, 5, "На сумму: ")
+  local sumY = 5
+  if totalCoin > 0 then
+    gpu.setForeground(C.error)
+    gpu.set(14, sumY, string.format("%.2f", totalCoin) .. " ₵")
+    sumY = sumY + 1
+  end
+  if totalEma > 0 then
+    gpu.setForeground(C.tomato)
+    gpu.set(14, sumY, string.format("%.2f", totalEma) .. " ۞")
+  end
+  gpu.setForeground(C.success)
+  gpu.set(55, 5, "Цена: ")
+  local priceY = 5
+  if purchaseItem.priceCoin and purchaseItem.priceCoin > 0 then
+    gpu.setForeground(C.accent_main)
+    gpu.set(62, priceY, string.format("%.2f", purchaseItem.priceCoin) .. " ₵")
+    priceY = priceY + 1
+  end
+  if purchaseItem.priceEma and purchaseItem.priceEma > 0 then
+    gpu.setForeground(C.tomato)
+    gpu.set(62, priceY, string.format("%.2f", purchaseItem.priceEma) .. " ۞")
+  end
+  gpu.setForeground(C.success)
+  gpu.set(3, 7, "Кол-во: ")
+  gpu.setForeground(C.text_bright)
+  gpu.set(12, 7, tostring(qty))
+  local keys = {{"1","2","3"},{"4","5","6"},{"7","8","9"},{"<","0","C"}}
+  local startX = 34
+  local startY = 11
+  local btnW = 3
+  local btnH = 1
+  local spacing = 2
+  for row = 1, 4 do
+    for col = 1, 3 do
+      local x = startX + (col-1)*(btnW + spacing)
+      local y = startY + (row-1)*(btnH + 1)
+      local text_ = keys[row][col]
+      gpu.setBackground(C.bg_button)
+      gpu.fill(x, y, btnW, btnH, " ")
+      gpu.setForeground(C.accent_main)
+      local tx = x + math.floor((btnW - unicode.len(text_))/2)
+      local ty = y
+      gpu.set(tx, ty, text_)
+    end
+  end
+  local backBtn = {x=19, y=24, xs=unicode.len("[ НАЗАД ]")+2, ys=1, text="[ НАЗАД ]", bg=C.bg_button, fg=C.accent_secondary}
+  local buyBtn  = {x=51, y=24, xs=unicode.len("[ КУПИТЬ ]")+2, ys=1, text="[ КУПИТЬ ]", bg=C.bg_button, fg=C.success}
+  drawFlexButton(backBtn)
+  drawFlexButton(buyBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки попапа "Недостаточно средств" (старая)
+function drawInsufficientPopup()
+  local popupWidth = 52
+  local popupHeight = 11
+  local popupX = math.floor((80 - popupWidth) / 2)
+  local popupY = 7
+  gpu.setBackground(C.black_fon)
+  gpu.fill(popupX, popupY, popupWidth, popupHeight, " ")
+  gpu.fill(popupX+1, popupY+1, popupWidth-2, popupHeight-2, " ")
+  drawPopupBorder(popupX, popupY, popupWidth, popupHeight, C.error)
+  gpu.setForeground(C.error)
+  local title = "НЕДОСТАТОЧНО СРЕДСТВ"
+  local titleX = popupX + math.floor((popupWidth - unicode.len(title)) / 2)
+  gpu.set(titleX, popupY, title)
+  gpu.setForeground(C.text_main)
+  local line1a = "Пополни баланс, не можешь купить"
+  local line1aX = popupX + math.floor((popupWidth - unicode.len(line1a)) / 2)
+  gpu.set(line1aX, popupY+2, line1a)
+  local line1b = "хотя бы 1 штуку предмета."
+  local line1bX = popupX + math.floor((popupWidth - unicode.len(line1b)) / 2)
+  gpu.set(line1bX, popupY+3, line1b)
+  gpu.setForeground(C.success)
+  gpu.set(popupX+3, popupY+5, "Твой баланс Coin: ")
+  gpu.setForeground(C.accent_main)
+  gpu.set(popupX+3 + unicode.len("Твой баланс Coin: "), popupY+5, string.format("%.2f", insufficientBalanceCoin or 0) .. " ₵")
+  if insufficientBalanceEma and insufficientBalanceEma > 0 then
+    gpu.setForeground(C.success)
+    gpu.set(popupX+3, popupY+6, "Твой баланс ЭМЫ: ")
+    gpu.setForeground(C.tomato)
+    gpu.set(popupX+3 + unicode.len("Твой баланс ЭМЫ: "), popupY+6, string.format("%.2f", insufficientBalanceEma) .. " ۞")
+  end
+  local okBtnText = "[ ПОНЯТНО ]"
+  local okBtnWidth = unicode.len(okBtnText) + 2
+  local okBtn = {
+    x = popupX + math.floor((popupWidth - okBtnWidth) / 2),
+    y = popupY+8,
+    xs = okBtnWidth,
+    ys = 1,
+    text = okBtnText,
+    bg = C.bg_button,
+    fg = C.success
+  }
+  drawFlexButton(okBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки попапа частичной выдачи (старая)
+function drawPartialPopup()
+  local popupWidth = 52
+  local popupHeight = 9
+  local popupX = math.floor((80 - popupWidth) / 2)
+  local popupY = 9
+  gpu.setBackground(C.black_fon)
+  gpu.fill(popupX, popupY, popupWidth, popupHeight, " ")
+  gpu.fill(popupX+1, popupY+1, popupWidth-2, popupHeight-2, " ")
+  drawPopupBorder(popupX, popupY, popupWidth, popupHeight, C.error)
+  gpu.setForeground(C.error)
+  local title = "НЕ ПОЛНАЯ ВЫДАЧА"
+  local titleX = popupX + math.floor((popupWidth - unicode.len(title)) / 2)
+  gpu.set(titleX, popupY, title)
+  gpu.setForeground(C.text_main)
+  local line1 = "Не хватило места в инвентаре!"
+  local line1X = popupX + math.floor((popupWidth - unicode.len(line1)) / 2)
+  gpu.set(line1X, popupY+2, line1)
+  local line2 = "Выдано " .. (partialExtracted or 0) .. " из " .. (partialRequested or 0)
+  local line2X = popupX + math.floor((popupWidth - unicode.len(line2)) / 2)
+  gpu.set(line2X, popupY+3, line2)
+  local spentLabelCoin = "Списано Coin: "
+  local spentValueCoin = string.format("%.2f", partialRefundCoin or 0) .. " ₵"
+  local fullSpentTextCoin = spentLabelCoin .. spentValueCoin
+  local spentStartXCoin = popupX + math.floor((popupWidth - unicode.len(fullSpentTextCoin)) / 2)
+  gpu.setForeground(C.success)
+  gpu.set(spentStartXCoin, popupY+4, spentLabelCoin)
+  gpu.setForeground(C.accent_main)
+  gpu.set(spentStartXCoin + unicode.len(spentLabelCoin), popupY+4, spentValueCoin)
+  if partialRefundEma and partialRefundEma > 0 then
+    local spentLabelEma = "Списано ЭМЫ: "
+    local spentValueEma = string.format("%.2f", partialRefundEma) .. " ۞"
+    local fullSpentTextEma = spentLabelEma .. spentValueEma
+    local spentStartXEma = popupX + math.floor((popupWidth - unicode.len(fullSpentTextEma)) / 2)
+    gpu.setForeground(C.success)
+    gpu.set(spentStartXEma, popupY+5, spentLabelEma)
+    gpu.setForeground(C.tomato)
+    gpu.set(spentStartXEma + unicode.len(spentLabelEma), popupY+5, spentValueEma)
+  end
+  local okBtnText = "[ ПРИНЯТЬ ]"
+  local okBtnWidth = unicode.len(okBtnText) + 2
+  local okBtn = {
+    x = popupX + math.floor((popupWidth - okBtnWidth) / 2),
+    y = popupY+6,
+    xs = okBtnWidth,
+    ys = 1,
+    text = okBtnText,
+    bg = C.bg_button,
+    fg = C.success
+  }
+  drawFlexButton(okBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки попапа "Инвентарь полон" (старая)
+function drawInventoryFullPopup()
+  local popupWidth = 52
+  local popupHeight = 9
+  local popupX = math.floor((80 - popupWidth) / 2)
+  local popupY = 9
+  gpu.setBackground(C.black_fon)
+  gpu.fill(popupX, popupY, popupWidth, popupHeight, " ")
+  gpu.fill(popupX+1, popupY+1, popupWidth-2, popupHeight-2, " ")
+  drawPopupBorder(popupX, popupY, popupWidth, popupHeight, C.error)
+  gpu.setForeground(C.error)
+  local title = "ПРЕДУПРЕЖДЕНИЕ"
+  local titleX = popupX + math.floor((popupWidth - unicode.len(title)) / 2)
+  gpu.set(titleX, popupY, title)
+  gpu.setForeground(C.text_main)
+  local line1 = "Ваш инвентарь полон!"
+  local line1X = popupX + math.floor((popupWidth - unicode.len(line1)) / 2)
+  gpu.set(line1X, popupY+2, line1)
+  local line2 = "Освободите его и повторите попытку."
+  local line2X = popupX + math.floor((popupWidth - unicode.len(line2)) / 2)
+  gpu.set(line2X, popupY+3, line2)
+  local okBtnText = "[ ПОНЯТНО ]"
+  local okBtnWidth = unicode.len(okBtnText) + 2
+  local okBtn = {
+    x = popupX + math.floor((popupWidth - okBtnWidth) / 2),
+    y = popupY+6,
+    xs = okBtnWidth,
+    ys = 1,
+    text = okBtnText,
+    bg = C.bg_button,
+    fg = C.success
+  }
+  drawFlexButton(okBtn)
+  drawTempMessage()
+end
+
+-- Функция отрисовки старого скроллбара (для совместимости)
+function drawScrollBarOld()
+  local total = #displayedItems
+  local barX = 78
+  local barY = 7
+  local barHeight = 15
+  gpu.setBackground(C.bg_main)
+  gpu.fill(barX, barY, 2, barHeight, " ")
+  if total <= 15 then return end
+  gpu.setBackground(C.bg_secondary)
+  gpu.fill(barX, barY, 2, barHeight, " ")
+  local thumbHeight = math.max(2, math.floor(barHeight * 15 / total))
+  local maxPos = barHeight - thumbHeight
+  local thumbPos = math.floor((scrollOffset - 1) * maxPos / (total - 15)) + 1
+  thumbPos = math.min(thumbPos, maxPos + 1)
+  gpu.setBackground(C.accent_main)
+  gpu.fill(barX, barY + thumbPos - 1, 2, thumbHeight, " ")
+  gpu.setBackground(C.bg_main)
+end
+
+-- Функция отрисовки старого списка товаров (для совместимости)
+function drawBuyItemsListOld()
+  -- Это заглушка, чтобы не ломались старые вызовы
+  drawProductList()
+end
+
+-- Функция отрисовки старой статики покупки (для совместимости)
+function drawBuyStaticOld()
+  -- Заглушка
+  drawTopBar()
+  drawMainFrames()
+  drawLeftHeader()
+end
+
+-- Функция отрисовки старой кнопки (для совместимости)
+function drawBuyButtonOld()
+  -- Заглушка
+end
+
+-- Функция отрисовки старого поля поиска (для совместимости)
+function redrawSearchFieldOld()
+  -- Заглушка
+end
+
+-- Функция отрисовки загрузки аккаунта (старая)
+function drawAccountLoading()
+  clear()
+  drawScreenBorder()
+  drawCenteredText(12, "Загрузка данных аккаунта...", C.text_main)
+  local backButton = {
+    text = "[ НАЗАД ]",
+    x = 37, y = 24,
+    xs = unicode.len("[ НАЗАД ]") + 2,
+    ys = 1,
+    bg = C.bg_button,
+    fg = C.accent_secondary
+  }
+  drawFlexButton(backButton)
+  drawTempMessage()
+end
+
+-- =====================================================================
+-- ГЛАВНЫЙ ЦИКЛ (ИСПОЛЬЗУЕТ НОВЫЙ ИНТЕРФЕЙС)
+-- =====================================================================
+local function main()
+  loadPlayers()
+  loadBuyItems()
+  loadSellItems()
+  filterItems()
+  term.clear()
+  while true do
+    local ev = {event.pull()}
+    local name = ev[1]
+    if name == "touch" then
+      handleClick(ev[3], ev[4])
+    elseif name == "scroll" then
+      local x, direction = ev[3], ev[5]
+      if x >= LIST_X and x <= LIST_X + LIST_W + 2 then
+        scroll(-direction)
+      end
+    elseif name == "key_down" then
+      local _, _, char, code = table.unpack(ev)
+      if searchFocused then
+        if code == keyboard.keys.enter or code == keyboard.keys.tab then
+          searchFocused = false
+        elseif code == keyboard.keys.back then
+          searchQuery = searchQuery:sub(1, -2)
+          filterItems()
+          redrawAll()
+        elseif char and char >= 32 then
+          if #searchQuery < 30 then
+            searchQuery = searchQuery .. unicode.char(char)
+            filterItems()
+            redrawAll()
+          end
+        end
+      else
+        if code == keyboard.keys.up then
+          selectItem(selectedIndex - 1)
+        elseif code == keyboard.keys.down then
+          selectItem(selectedIndex + 1)
+        elseif code == keyboard.keys.back then
+          quantity = quantity:sub(1, -2)
+          redrawAll()
+        elseif char and char >= 48 and char <= 57 then
+          if #quantity < 8 then
+            quantity = quantity .. string.char(char)
+            redrawAll()
+          end
+        elseif code == keyboard.keys.escape then
+          break
+        end
+      end
+    end
+    local onPim = getPlayerOnPim()
+    if onPim and onPim ~= "" then
+      if currentPlayer ~= onPim then
+        currentPlayer = onPim
+        getOrCreatePlayer(currentPlayer)
+        updateAccountDisplay()
+        redrawAll()
+      end
+    else
+      if currentPlayer then
+        currentPlayer = nil
+        updateAccountDisplay()
+        redrawAll()
+      end
+    end
+  end
+  term.clear()
+  gpu.setForeground(0xFFFFFF)
+  gpu.setBackground(0x000000)
+end
+
+main()
