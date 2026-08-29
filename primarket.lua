@@ -1813,7 +1813,7 @@ function drawAccountLoading()
 end
 
 -- =====================================================================
--- ГЛАВНЫЙ ЦИКЛ (ИСПОЛЬЗУЕТ НОВЫЙ ИНТЕРФЕЙС)
+-- ГЛАВНЫЙ ЦИКЛ (ИСПОЛЬЗУЕТ НОВЫЙ ИНТЕРФЕЙС ПОСЛЕ ВХОДА ИГРОКА)
 -- =====================================================================
 local function main()
   loadPlayers()
@@ -1821,67 +1821,97 @@ local function main()
   loadSellItems()
   filterItems()
   term.clear()
-  redrawAll()  -- <-- ИСПРАВЛЕНО: добавляем вызов отрисовки после очистки
+  
+  -- Показываем приветственный экран (с diamond) до появления игрока
+  drawWelcomeScreen()
+  
+  local mainInterfaceShown = false  -- флаг, что основной интерфейс уже показан
+
   while true do
-    local ev = {event.pull()}
+    local ev = {event.pull(0.5)}  -- таймаут для периодической проверки PIM
     local name = ev[1]
-    if name == "touch" then
-      handleClick(ev[3], ev[4])
-    elseif name == "scroll" then
-      local x, direction = ev[3], ev[5]
-      if x >= LIST_X and x <= LIST_X + LIST_W + 2 then
-        scroll(-direction)
-      end
-    elseif name == "key_down" then
-      local _, _, char, code = table.unpack(ev)
-      if searchFocused then
-        if code == keyboard.keys.enter or code == keyboard.keys.tab then
-          searchFocused = false
-        elseif code == keyboard.keys.back then
-          searchQuery = searchQuery:sub(1, -2)
-          filterItems()
-          redrawAll()
-        elseif char and char >= 32 then
-          if #searchQuery < 30 then
-            searchQuery = searchQuery .. unicode.char(char)
+    
+    -- Обработка событий только если основной интерфейс активен
+    if mainInterfaceShown then
+      if name == "touch" then
+        handleClick(ev[3], ev[4])
+      elseif name == "scroll" then
+        local x, direction = ev[3], ev[5]
+        if x >= LIST_X and x <= LIST_X + LIST_W + 2 then
+          scroll(-direction)
+        end
+      elseif name == "key_down" then
+        local _, _, char, code = table.unpack(ev)
+        if searchFocused then
+          if code == keyboard.keys.enter or code == keyboard.keys.tab then
+            searchFocused = false
+          elseif code == keyboard.keys.back then
+            searchQuery = searchQuery:sub(1, -2)
             filterItems()
             redrawAll()
+          elseif char and char >= 32 then
+            if #searchQuery < 30 then
+              searchQuery = searchQuery .. unicode.char(char)
+              filterItems()
+              redrawAll()
+            end
           end
-        end
-      else
-        if code == keyboard.keys.up then
-          selectItem(selectedIndex - 1)
-        elseif code == keyboard.keys.down then
-          selectItem(selectedIndex + 1)
-        elseif code == keyboard.keys.back then
-          quantity = quantity:sub(1, -2)
-          redrawAll()
-        elseif char and char >= 48 and char <= 57 then
-          if #quantity < 8 then
-            quantity = quantity .. string.char(char)
+        else
+          if code == keyboard.keys.up then
+            selectItem(selectedIndex - 1)
+          elseif code == keyboard.keys.down then
+            selectItem(selectedIndex + 1)
+          elseif code == keyboard.keys.back then
+            quantity = quantity:sub(1, -2)
             redrawAll()
+          elseif char and char >= 48 and char <= 57 then
+            if #quantity < 8 then
+              quantity = quantity .. string.char(char)
+              redrawAll()
+            end
+          elseif code == keyboard.keys.escape then
+            break
           end
-        elseif code == keyboard.keys.escape then
-          break
         end
       end
     end
+    
+    -- Проверка статуса игрока на PIM (выполняется всегда)
     local onPim = getPlayerOnPim()
+    
     if onPim and onPim ~= "" then
-      if currentPlayer ~= onPim then
+      if not mainInterfaceShown then
+        -- Игрок появился – переключаем на основной интерфейс
         currentPlayer = onPim
         getOrCreatePlayer(currentPlayer)
         updateAccountDisplay()
+        -- Загружаем товары (может быть, уже загружены, но перезагрузим на всякий случай)
+        loadBuyItems()
+        loadSellItems()
+        filterItems()
+        redrawAll()
+        mainInterfaceShown = true
+      elseif currentPlayer ~= onPim then
+        -- Игрок сменился на PIM (другой) – обновляем данные
+        currentPlayer = onPim
+        getOrCreatePlayer(currentPlayer)
+        updateAccountDisplay()
+        loadBuyItems()
+        loadSellItems()
+        filterItems()
         redrawAll()
       end
     else
-      if currentPlayer then
+      if mainInterfaceShown then
+        -- Игрок ушёл с PIM – возвращаем приветственный экран
         currentPlayer = nil
         updateAccountDisplay()
-        redrawAll()
+        drawWelcomeScreen()
+        mainInterfaceShown = false
       end
     end
   end
+
   term.clear()
   gpu.setForeground(0xFFFFFF)
   gpu.setBackground(0x000000)
